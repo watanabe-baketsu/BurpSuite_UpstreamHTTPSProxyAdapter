@@ -60,20 +60,7 @@ permissions:
 
 jobs:
   build-sign-notarize:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # macos-latest  → Apple Silicon (arm64) runner
-          - runner: macos-latest
-            arch: arm64
-            label: darwin-arm64
-          # macos-13      → Intel (amd64) runner
-          - runner: macos-13
-            arch: amd64
-            label: darwin-amd64
-
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-latest
     timeout-minutes: 60
 
     # ── 変数をまとめる ──────────────────────────────────
@@ -188,7 +175,7 @@ jobs:
       # -platform darwin/<arch> で .app バンドルを生成。
       # ビルド成果物は build/bin/<app-name>.app に出力される。
       - name: Wails build
-        run: wails build -platform "darwin/${{ matrix.arch }}"
+        run: wails build -platform "darwin/arm64"
 
       # ════════════════════════════════════════════════
       # 6. コード署名 (Developer ID Application)
@@ -303,7 +290,7 @@ jobs:
       # ════════════════════════════════════════════════
       - name: Create distribution zip
         run: |
-          ARTIFACT_NAME="${{ inputs.app-name }}-${{ matrix.label }}"
+          ARTIFACT_NAME="${{ inputs.app-name }}-darwin-arm64"
           ditto -c -k --keepParent \
             "${APP_BUNDLE}" \
             "${ARTIFACT_NAME}.zip"
