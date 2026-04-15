@@ -84,11 +84,6 @@ jobs:
   wails-build:
     name: "Wails build (Linux)"
     runs-on: ubuntu-22.04
-    # Only run full build on main push or when workflow files change.
-    # PRs get Go test + frontend build which is faster feedback.
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.labels.*.name, 'full-build')
     needs: [go-test, frontend]
 
     steps:
