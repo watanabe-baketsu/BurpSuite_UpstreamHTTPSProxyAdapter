@@ -45,7 +45,7 @@ func (l *Logger) SetCallback(cb EventCallback) {
 
 func (l *Logger) log(level Level, format string, args ...interface{}) {
 	entry := Entry{
-		Time:    time.Now().Format("15:04:05.000"),
+		Time:    time.Now().Format("2006-01-02T15:04:05.000Z07:00"),
 		Level:   level,
 		Message: fmt.Sprintf(format, args...),
 	}

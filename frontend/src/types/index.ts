@@ -23,6 +23,7 @@ export interface LogEntry {
   time: string;
   level: string;
   message: string;
+  _id?: number;
 }
 
 export interface CheckResult {

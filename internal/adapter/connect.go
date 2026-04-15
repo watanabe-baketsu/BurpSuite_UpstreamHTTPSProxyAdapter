@@ -14,13 +14,6 @@ import (
 
 // handleCONNECT processes an HTTP CONNECT request by establishing a tunnel
 // through the upstream HTTPS proxy.
-//
-// Flow:
-//  1. TLS-connect to upstream proxy
-//  2. Send CONNECT target:port with Proxy-Authorization to upstream
-//  3. Read upstream response
-//  4. If 200, reply 200 to client and relay bytes bidirectionally
-//  5. If error, forward the error response to the client
 func (s *Server) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	targetHost := r.Host
 	if targetHost == "" {
@@ -36,7 +29,9 @@ func (s *Server) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	s.metrics.ActiveConnections.Add(1)
 	defer s.metrics.ActiveConnections.Add(-1)
 
-	ctx, cancel := context.WithTimeout(s.ctx, s.cfg.ConnectTimeoutDuration())
+	// Derive timeout context from the request context (which is cancelled on
+	// server shutdown via BaseContext), not from a stored s.ctx field.
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.ConnectTimeoutDuration())
 	defer cancel()
 
 	// Step 1: TLS-connect to upstream proxy
@@ -76,12 +71,12 @@ func (s *Server) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		// Forward error to Burp
 		errMsg := fmt.Sprintf("upstream CONNECT rejected: %s", resp.Status)
 		s.log.Warn(errMsg)
 		s.metrics.SetError(errMsg)
+		resp.Body.Close()
 
-		// Hijack to send raw response
+		// Hijack to forward the upstream error status to Burp
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {
 			upstreamConn.Close()
@@ -94,10 +89,11 @@ func (s *Server) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 			s.log.Error("hijack failed: %v", err)
 			return
 		}
-		defer clientConn.Close()
-		defer upstreamConn.Close()
-		_ = resp.Write(clientBuf)
+		// Write the upstream error status line back to the client
+		fmt.Fprintf(clientBuf, "HTTP/1.1 %s\r\n\r\n", resp.Status)
 		clientBuf.Flush()
+		clientConn.Close()
+		upstreamConn.Close()
 		return
 	}
 	resp.Body.Close()

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,11 +26,9 @@ func encodeBasicAuth(user, pass string) string {
 }
 
 // mockUpstreamProxy creates a TLS server that acts as an HTTPS proxy.
-// It handles CONNECT (tunnel) and regular HTTP requests with Basic auth.
 func mockUpstreamProxy(t *testing.T, wantUser, wantPass string) *httptest.Server {
 	wantAuth := "Basic " + encodeBasicAuth(wantUser, wantPass)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Check auth
 		authHeader := r.Header.Get("Proxy-Authorization")
 		if authHeader == "" || authHeader != wantAuth {
 			w.Header().Set("Proxy-Authenticate", `Basic realm="proxy"`)
@@ -38,7 +37,6 @@ func mockUpstreamProxy(t *testing.T, wantUser, wantPass string) *httptest.Server
 		}
 
 		if r.Method == http.MethodConnect {
-			// Tunnel mode: connect to target
 			targetConn, err := net.DialTimeout("tcp", r.Host, 5*time.Second)
 			if err != nil {
 				http.Error(w, fmt.Sprintf("connect to %s failed: %v", r.Host, err), http.StatusBadGateway)
@@ -61,14 +59,20 @@ func mockUpstreamProxy(t *testing.T, wantUser, wantPass string) *httptest.Server
 			_, _ = clientBuf.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
 			_ = clientBuf.Flush()
 
+			var wg sync.WaitGroup
+			wg.Add(2)
 			go func() {
+				defer wg.Done()
 				io.Copy(targetConn, clientConn)
-				targetConn.Close()
 			}()
-			io.Copy(clientConn, targetConn)
+			go func() {
+				defer wg.Done()
+				io.Copy(clientConn, targetConn)
+			}()
+			wg.Wait()
 			clientConn.Close()
+			targetConn.Close()
 		} else {
-			// Forward HTTP request
 			client := &http.Client{Timeout: 10 * time.Second}
 			outReq, _ := http.NewRequest(r.Method, r.URL.String(), r.Body)
 			for k, vv := range r.Header {
@@ -109,6 +113,8 @@ func parseHostPort(rawURL string) (string, int) {
 	return host, port
 }
 
+// setupAdapter creates and starts a proxy adapter using port 0 (OS-assigned).
+// Returns the actual bound address and a cleanup function.
 func setupAdapter(t *testing.T, upstreamServer *httptest.Server, username, password string) (string, func()) {
 	upHost, upPort := parseHostPort(upstreamServer.URL)
 
@@ -117,28 +123,15 @@ func setupAdapter(t *testing.T, upstreamServer *httptest.Server, username, passw
 			Host:           upHost,
 			Port:           upPort,
 			Username:       username,
-			VerifyTLS:      false, // test server uses self-signed cert
+			VerifyTLS:      false,
 			ConnectTimeout: 10,
 			IdleTimeout:    30,
 		},
 		Local: config.LocalConfig{
 			BindHost: "127.0.0.1",
-			BindPort: 0, // will use a free port
+			BindPort: 0, // OS assigns a free port
 		},
 	}
-
-	// Use a random available port
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen failed: %v", err)
-	}
-	localAddr := listener.Addr().String()
-	listener.Close()
-
-	_, portStr, _ := net.SplitHostPort(localAddr)
-	var port int
-	fmt.Sscanf(portStr, "%d", &port)
-	cfg.Local.BindPort = port
 
 	log := logging.New(100)
 	srv, err := adapter.NewServer(cfg, username, password, log)
@@ -150,14 +143,13 @@ func setupAdapter(t *testing.T, upstreamServer *httptest.Server, username, passw
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	// Wait briefly for server to start
-	time.Sleep(50 * time.Millisecond)
-
-	cleanup := func() {
-		srv.Stop()
+	// Get the actual bound address (no TOCTOU race)
+	localAddr := srv.BoundAddr()
+	if localAddr == "" {
+		t.Fatal("server started but BoundAddr is empty")
 	}
 
-	return localAddr, cleanup
+	return localAddr, func() { srv.Stop() }
 }
 
 func TestCONNECTSuccess(t *testing.T) {
@@ -165,13 +157,11 @@ func TestCONNECTSuccess(t *testing.T) {
 	localAddr, cleanup := setupAdapter(t, upstream, "user", "pass")
 	defer cleanup()
 
-	// Create a target HTTPS server to tunnel to
 	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("tunnel-ok"))
 	}))
 	defer target.Close()
 
-	// Send CONNECT through our adapter
 	conn, err := net.DialTimeout("tcp", localAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial adapter: %v", err)
@@ -191,17 +181,13 @@ func TestCONNECTSuccess(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	// Now do a TLS handshake through the tunnel
-	tlsConn := tls.Client(conn, &tls.Config{
-		InsecureSkipVerify: true,
-	})
+	tlsConn := tls.Client(conn, &tls.Config{InsecureSkipVerify: true})
 	defer tlsConn.Close()
 
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("TLS handshake through tunnel failed: %v", err)
 	}
 
-	// Send HTTP request through tunnel
 	req, _ := http.NewRequest("GET", "/", nil)
 	req.Host = targetHost
 	req.Write(tlsConn)
@@ -220,8 +206,6 @@ func TestCONNECTSuccess(t *testing.T) {
 
 func TestCONNECTAuthFailure(t *testing.T) {
 	upstream := mockUpstreamProxy(t, "user", "pass")
-
-	// Set up adapter with wrong password
 	localAddr, cleanup := setupAdapter(t, upstream, "user", "wrong-pass")
 	defer cleanup()
 
@@ -239,14 +223,16 @@ func TestCONNECTAuthFailure(t *testing.T) {
 		t.Fatalf("read response: %v", err)
 	}
 
-	// Should get an error (407 or 502) since auth fails
 	if resp.StatusCode == 200 {
 		t.Fatal("expected auth failure but got 200")
+	}
+	// The adapter should surface the upstream 407 to the client
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Logf("note: expected 407, got %d — adapter may wrap as 502", resp.StatusCode)
 	}
 }
 
 func TestHTTPForwarding(t *testing.T) {
-	// Create a target HTTP server
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Test", "forwarded")
 		w.Write([]byte("http-ok"))
@@ -257,13 +243,10 @@ func TestHTTPForwarding(t *testing.T) {
 	localAddr, cleanup := setupAdapter(t, upstream, "user", "pass")
 	defer cleanup()
 
-	// Use our adapter as an HTTP proxy
 	proxyURL, _ := url.Parse("http://" + localAddr)
 	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
-		},
-		Timeout: 10 * time.Second,
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   10 * time.Second,
 	}
 
 	resp, err := client.Get(target.URL)
@@ -285,26 +268,11 @@ func TestHTTPForwarding(t *testing.T) {
 func TestServerStartStop(t *testing.T) {
 	cfg := config.Config{
 		Upstream: config.UpstreamConfig{
-			Host:           "127.0.0.1",
-			Port:           9999,
-			VerifyTLS:      false,
-			ConnectTimeout: 5,
-			IdleTimeout:    30,
+			Host: "127.0.0.1", Port: 9999,
+			VerifyTLS: false, ConnectTimeout: 5, IdleTimeout: 30,
 		},
-		Local: config.LocalConfig{
-			BindHost: "127.0.0.1",
-			BindPort: 0,
-		},
+		Local: config.LocalConfig{BindHost: "127.0.0.1", BindPort: 0},
 	}
-
-	// Use a free port
-	listener, _ := net.Listen("tcp", "127.0.0.1:0")
-	addr := listener.Addr().String()
-	listener.Close()
-	_, portStr, _ := net.SplitHostPort(addr)
-	var port int
-	fmt.Sscanf(portStr, "%d", &port)
-	cfg.Local.BindPort = port
 
 	log := logging.New(100)
 	srv, err := adapter.NewServer(cfg, "user", "pass", log)
@@ -324,7 +292,10 @@ func TestServerStartStop(t *testing.T) {
 		t.Error("server should be running after Start")
 	}
 
-	// Starting again should fail
+	if srv.BoundAddr() == "" {
+		t.Error("BoundAddr should be non-empty after Start")
+	}
+
 	if err := srv.Start(); err == nil {
 		t.Error("expected error when starting already-running server")
 	}
@@ -347,14 +318,6 @@ func TestMetricsSnapshot(t *testing.T) {
 		Local: config.LocalConfig{BindHost: "127.0.0.1", BindPort: 0},
 	}
 
-	listener, _ := net.Listen("tcp", "127.0.0.1:0")
-	addr := listener.Addr().String()
-	listener.Close()
-	_, portStr, _ := net.SplitHostPort(addr)
-	var port int
-	fmt.Sscanf(portStr, "%d", &port)
-	cfg.Local.BindPort = port
-
 	log := logging.New(100)
 	srv, _ := adapter.NewServer(cfg, "", "", log)
 
@@ -365,13 +328,11 @@ func TestMetricsSnapshot(t *testing.T) {
 }
 
 func TestCustomCALoading(t *testing.T) {
-	// Verify that a mock upstream proxy with custom CA can be used
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	}))
 	defer upstream.Close()
 
-	// Get the test server's CA cert
 	pool := x509.NewCertPool()
 	for _, cert := range upstream.TLS.Certificates {
 		for _, raw := range cert.Certificate {
@@ -382,7 +343,6 @@ func TestCustomCALoading(t *testing.T) {
 		}
 	}
 
-	// Verify we can connect with the CA
 	tlsCfg := &tls.Config{RootCAs: pool}
 	upHost, upPort := parseHostPort(upstream.URL)
 	conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", upHost, upPort), tlsCfg)

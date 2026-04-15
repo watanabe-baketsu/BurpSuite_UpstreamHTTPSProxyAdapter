@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { EventsOn } from '../wailsjs/runtime/runtime';
+import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 import {
   GetConfig, SaveConfig, StartProxy, StopProxy, GetStatus,
   GetMetrics, GetLogs, ClearLogs, SelectCAFile,
@@ -24,6 +24,7 @@ function App() {
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<'config' | 'diagnostics' | 'activity' | 'help'>('config');
   const logEndRef = useRef<HTMLDivElement>(null);
+  const logIdRef = useRef(0);
 
   useEffect(() => {
     GetConfig().then(setConfig).catch(e => setError(String(e)));
@@ -33,11 +34,16 @@ function App() {
 
   useEffect(() => {
     EventsOn('log', (entry: LogEntry) => {
-      setLogs(prev => [...prev.slice(-499), entry]);
+      const id = ++logIdRef.current;
+      setLogs(prev => [...prev.slice(-499), { ...entry, _id: id }]);
     });
     EventsOn('status', (s: string) => {
       setStatus(s as 'running' | 'stopped');
     });
+    return () => {
+      EventsOff('log');
+      EventsOff('status');
+    };
   }, []);
 
   useEffect(() => {
@@ -96,13 +102,13 @@ function App() {
     setDiagnosticRunning(true);
     setDiagnosticResult(null);
     try {
-      await SaveConfig(config);
       const result = await fn();
       setDiagnosticResult(result);
     } catch (e) {
       setDiagnosticResult({ ok: false, message: String(e), latency: '' });
+    } finally {
+      setDiagnosticRunning(false);
     }
-    setDiagnosticRunning(false);
   };
 
   const updateField = <K extends keyof ConfigDTO>(key: K, value: ConfigDTO[K]) => {
@@ -270,8 +276,8 @@ function App() {
               </div>
               <div className="log-panel">
                 {logs.length === 0 && <div className="log-empty">No log entries yet</div>}
-                {logs.map((entry, i) => (
-                  <div key={i} className={`log-entry level-${entry.level.toLowerCase()}`}>
+                {logs.map((entry) => (
+                  <div key={entry._id ?? entry.time} className={`log-entry level-${entry.level.toLowerCase()}`}>
                     <span className="log-time">{entry.time}</span>
                     <span className="log-level">{entry.level}</span>
                     <span className="log-msg">{entry.message}</span>

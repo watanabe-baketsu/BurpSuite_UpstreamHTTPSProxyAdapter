@@ -16,14 +16,15 @@ var hopByHopHeaders = []string{
 }
 
 func removeHopByHop(h http.Header) {
+	// Read Connection header value BEFORE deleting it (RFC 7230 §6.1).
+	connVal := h.Get("Connection")
+
 	for _, hdr := range hopByHopHeaders {
 		h.Del(hdr)
 	}
-	// Also handle Connection header's listed headers
-	if conn := h.Get("Connection"); conn != "" {
-		for _, f := range splitCSV(conn) {
-			h.Del(f)
-		}
+	// Also remove any headers listed in the Connection value.
+	for _, f := range splitCSV(connVal) {
+		h.Del(f)
 	}
 }
 

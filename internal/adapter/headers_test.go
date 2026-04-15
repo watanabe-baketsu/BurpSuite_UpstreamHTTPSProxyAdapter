@@ -32,6 +32,27 @@ func TestRemoveHopByHop(t *testing.T) {
 	}
 }
 
+func TestRemoveHopByHopConnectionListed(t *testing.T) {
+	// RFC 7230 §6.1: headers listed in Connection must also be removed.
+	h := http.Header{}
+	h.Set("Connection", "X-Remove-Me, X-Also-Remove")
+	h.Set("X-Remove-Me", "should-go")
+	h.Set("X-Also-Remove", "should-go-too")
+	h.Set("X-Keep", "keep-this")
+
+	removeHopByHop(h)
+
+	if h.Get("X-Remove-Me") != "" {
+		t.Error("X-Remove-Me listed in Connection should be removed")
+	}
+	if h.Get("X-Also-Remove") != "" {
+		t.Error("X-Also-Remove listed in Connection should be removed")
+	}
+	if h.Get("X-Keep") != "keep-this" {
+		t.Error("X-Keep should be preserved")
+	}
+}
+
 func TestCopyHeaders(t *testing.T) {
 	src := http.Header{}
 	src.Set("Content-Type", "text/html")

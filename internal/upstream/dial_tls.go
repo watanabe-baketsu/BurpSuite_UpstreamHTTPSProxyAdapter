@@ -48,8 +48,11 @@ func LoadCustomCA(path string) (*x509.CertPool, error) {
 }
 
 func DialTLS(ctx context.Context, addr string, timeout time.Duration, tlsCfg *tls.Config) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: timeout}
-	conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsCfg)
+	dialer := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: timeout},
+		Config:    tlsCfg,
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("TLS dial %s: %w", addr, err)
 	}

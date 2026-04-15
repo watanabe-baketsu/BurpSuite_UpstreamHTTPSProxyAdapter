@@ -102,11 +102,8 @@ func TestLocalAddr(t *testing.T) {
 }
 
 func TestSaveLoad(t *testing.T) {
-	// Create a temp dir for config
 	tmp := t.TempDir()
-	origHome := os.Getenv("HOME")
 	t.Setenv("HOME", tmp)
-	defer os.Setenv("HOME", origHome)
 
 	cfg := Default()
 	cfg.Upstream.Host = "test-proxy.example.com"

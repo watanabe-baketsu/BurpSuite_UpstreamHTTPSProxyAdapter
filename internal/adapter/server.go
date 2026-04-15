@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -15,19 +16,19 @@ import (
 )
 
 type Server struct {
-	cfg      config.Config
-	username string
-	password string
-	tlsCfg   *tls.Config
-	log      *logging.Logger
-	metrics  *Metrics
+	cfg       config.Config
+	username  string
+	password  string
+	tlsCfg    *tls.Config
+	log       *logging.Logger
+	metrics   *Metrics
+	transport *http.Transport
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	listener  net.Listener
-	server    *http.Server
-	mu        sync.Mutex
-	running   bool
+	cancel   context.CancelFunc
+	listener net.Listener
+	server   *http.Server
+	mu       sync.Mutex
+	running  bool
 }
 
 func NewServer(cfg config.Config, username, password string, log *logging.Logger) (*Server, error) {
@@ -40,13 +41,25 @@ func NewServer(cfg config.Config, username, password string, log *logging.Logger
 		return nil, fmt.Errorf("build TLS config: %w", err)
 	}
 
+	proxyURL := &url.URL{
+		Scheme: "https",
+		Host:   cfg.UpstreamAddr(),
+		User:   url.UserPassword(username, password),
+	}
+
+	transport := &http.Transport{
+		Proxy:           http.ProxyURL(proxyURL),
+		TLSClientConfig: tlsCfg,
+	}
+
 	return &Server{
-		cfg:      cfg,
-		username: username,
-		password: password,
-		tlsCfg:   tlsCfg,
-		log:      log,
-		metrics:  NewMetrics(),
+		cfg:       cfg,
+		username:  username,
+		password:  password,
+		tlsCfg:    tlsCfg,
+		log:       log,
+		metrics:   NewMetrics(),
+		transport: transport,
 	}, nil
 }
 
@@ -64,14 +77,16 @@ func (s *Server) Start() error {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	var ctx context.Context
+	ctx, s.cancel = context.WithCancel(context.Background())
 	s.listener = listener
 
 	s.server = &http.Server{
-		Handler:      http.HandlerFunc(s.handleRequest),
-		ReadTimeout:  s.cfg.ConnectTimeoutDuration(),
+		Handler:     http.HandlerFunc(s.handleRequest),
+		ReadTimeout: s.cfg.ConnectTimeoutDuration(),
 		WriteTimeout: 0, // No write timeout for tunnels
 		IdleTimeout:  s.cfg.IdleTimeoutDuration(),
+		BaseContext:  func(_ net.Listener) context.Context { return ctx },
 	}
 
 	s.running = true
@@ -106,6 +121,7 @@ func (s *Server) Stop() error {
 		s.server.Close()
 	}
 
+	s.transport.CloseIdleConnections()
 	s.running = false
 	s.log.Info("Proxy server stopped")
 	return nil
@@ -119,6 +135,15 @@ func (s *Server) IsRunning() bool {
 
 func (s *Server) GetMetrics() MetricsSnapshot {
 	return s.metrics.Snapshot()
+}
+
+func (s *Server) BoundAddr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener != nil {
+		return s.listener.Addr().String()
+	}
+	return ""
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {

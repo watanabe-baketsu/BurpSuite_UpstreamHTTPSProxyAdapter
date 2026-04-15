@@ -32,12 +32,10 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
-	// Push log entries to frontend
 	a.log.SetCallback(func(entry logging.Entry) {
 		runtime.EventsEmit(ctx, "log", entry)
 	})
 
-	// Load saved config
 	cfg, err := config.Load()
 	if err != nil {
 		a.log.Warn("Failed to load config, using defaults: %v", err)
@@ -58,16 +56,16 @@ func (a *App) shutdown(_ context.Context) {
 // --- Config methods ---
 
 type ConfigDTO struct {
-	UpstreamHost     string `json:"upstream_host"`
-	UpstreamPort     int    `json:"upstream_port"`
-	Username         string `json:"username"`
-	Password         string `json:"password"`
-	VerifyTLS        bool   `json:"verify_tls"`
-	CustomCAPath     string `json:"custom_ca_path"`
-	ConnectTimeout   int    `json:"connect_timeout"`
-	IdleTimeout      int    `json:"idle_timeout"`
-	BindHost         string `json:"bind_host"`
-	BindPort         int    `json:"bind_port"`
+	UpstreamHost   string `json:"upstream_host"`
+	UpstreamPort   int    `json:"upstream_port"`
+	Username       string `json:"username"`
+	Password       string `json:"password"`
+	VerifyTLS      bool   `json:"verify_tls"`
+	CustomCAPath   string `json:"custom_ca_path"`
+	ConnectTimeout int    `json:"connect_timeout"`
+	IdleTimeout    int    `json:"idle_timeout"`
+	BindHost       string `json:"bind_host"`
+	BindPort       int    `json:"bind_port"`
 }
 
 func (a *App) GetConfig() ConfigDTO {
@@ -90,7 +88,11 @@ func (a *App) SaveConfig(dto ConfigDTO) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.cfg = config.Config{
+	if a.server != nil && a.server.IsRunning() {
+		return fmt.Errorf("cannot save config while proxy is running — stop the proxy first")
+	}
+
+	newCfg := config.Config{
 		Upstream: config.UpstreamConfig{
 			Host:           dto.UpstreamHost,
 			Port:           dto.UpstreamPort,
@@ -106,21 +108,21 @@ func (a *App) SaveConfig(dto ConfigDTO) error {
 		},
 	}
 
-	if err := a.cfg.Validate(); err != nil {
+	if err := newCfg.Validate(); err != nil {
 		return fmt.Errorf("validation: %w", err)
 	}
 
-	// Save password to keychain (never to JSON)
 	if dto.Password != "" {
 		if err := keychain.SavePassword(dto.Username, dto.Password); err != nil {
 			return fmt.Errorf("save password: %w", err)
 		}
 	}
 
-	if err := config.Save(a.cfg); err != nil {
+	if err := config.Save(newCfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 
+	a.cfg = newCfg
 	a.log.Info("Config saved")
 	return nil
 }
@@ -199,48 +201,41 @@ func (a *App) ClearLogs() {
 
 // --- Diagnostics ---
 
-func (a *App) TestUpstreamTLS() upstream.CheckResult {
-	cfg := a.cfg
-	tlsCfg := &tls.Config{
-		InsecureSkipVerify: !cfg.Upstream.VerifyTLS,
-		ServerName:         cfg.Upstream.Host,
-	}
-	if cfg.Upstream.CustomCAPath != "" {
-		pool, err := upstream.LoadCustomCA(cfg.Upstream.CustomCAPath)
-		if err != nil {
-			return upstream.CheckResult{OK: false, Message: err.Error()}
-		}
-		tlsCfg.RootCAs = pool
-	}
-	result := upstream.CheckTLS(a.ctx, cfg.UpstreamAddr(), cfg.ConnectTimeoutDuration(), tlsCfg)
+// buildDiagTLS creates a TLS config from the current app config for diagnostics.
+func (a *App) buildDiagTLS() (*tls.Config, error) {
+	return upstream.BuildTLSConfig(upstream.TLSConfig{
+		VerifyTLS:  a.cfg.Upstream.VerifyTLS,
+		CustomCA:   a.cfg.Upstream.CustomCAPath,
+		ServerName: a.cfg.Upstream.Host,
+	})
+}
+
+func (a *App) logCheckResult(testName string, result upstream.CheckResult) {
 	if result.OK {
-		a.log.Info("TLS test passed: %s", result.Message)
+		a.log.Info("%s passed: %s", testName, result.Message)
 	} else {
-		a.log.Error("TLS test failed: %s", result.Message)
+		a.log.Error("%s failed: %s", testName, result.Message)
 	}
+}
+
+func (a *App) TestUpstreamTLS() upstream.CheckResult {
+	tlsCfg, err := a.buildDiagTLS()
+	if err != nil {
+		return upstream.CheckResult{OK: false, Message: err.Error()}
+	}
+	result := upstream.CheckTLS(a.ctx, a.cfg.UpstreamAddr(), a.cfg.ConnectTimeoutDuration(), tlsCfg)
+	a.logCheckResult("TLS test", result)
 	return result
 }
 
 func (a *App) TestProxyAuth() upstream.CheckResult {
-	cfg := a.cfg
-	pw, _ := keychain.LoadPassword(cfg.Upstream.Username)
-	tlsCfg := &tls.Config{
-		InsecureSkipVerify: !cfg.Upstream.VerifyTLS,
-		ServerName:         cfg.Upstream.Host,
+	pw, _ := keychain.LoadPassword(a.cfg.Upstream.Username)
+	tlsCfg, err := a.buildDiagTLS()
+	if err != nil {
+		return upstream.CheckResult{OK: false, Message: err.Error()}
 	}
-	if cfg.Upstream.CustomCAPath != "" {
-		pool, err := upstream.LoadCustomCA(cfg.Upstream.CustomCAPath)
-		if err != nil {
-			return upstream.CheckResult{OK: false, Message: err.Error()}
-		}
-		tlsCfg.RootCAs = pool
-	}
-	result := upstream.CheckProxyAuth(a.ctx, cfg.UpstreamAddr(), cfg.ConnectTimeoutDuration(), tlsCfg, cfg.Upstream.Username, pw)
-	if result.OK {
-		a.log.Info("Auth test passed: %s", result.Message)
-	} else {
-		a.log.Error("Auth test failed: %s", result.Message)
-	}
+	result := upstream.CheckProxyAuth(a.ctx, a.cfg.UpstreamAddr(), a.cfg.ConnectTimeoutDuration(), tlsCfg, a.cfg.Upstream.Username, pw)
+	a.logCheckResult("Auth test", result)
 	return result
 }
 
@@ -248,25 +243,13 @@ func (a *App) TestCONNECT(target string) upstream.CheckResult {
 	if target == "" {
 		target = "example.com:443"
 	}
-	cfg := a.cfg
-	pw, _ := keychain.LoadPassword(cfg.Upstream.Username)
-	tlsCfg := &tls.Config{
-		InsecureSkipVerify: !cfg.Upstream.VerifyTLS,
-		ServerName:         cfg.Upstream.Host,
+	pw, _ := keychain.LoadPassword(a.cfg.Upstream.Username)
+	tlsCfg, err := a.buildDiagTLS()
+	if err != nil {
+		return upstream.CheckResult{OK: false, Message: err.Error()}
 	}
-	if cfg.Upstream.CustomCAPath != "" {
-		pool, err := upstream.LoadCustomCA(cfg.Upstream.CustomCAPath)
-		if err != nil {
-			return upstream.CheckResult{OK: false, Message: err.Error()}
-		}
-		tlsCfg.RootCAs = pool
-	}
-	result := upstream.CheckCONNECT(a.ctx, cfg.UpstreamAddr(), cfg.ConnectTimeoutDuration(), tlsCfg, cfg.Upstream.Username, pw, target)
-	if result.OK {
-		a.log.Info("CONNECT test passed: %s", result.Message)
-	} else {
-		a.log.Error("CONNECT test failed: %s", result.Message)
-	}
+	result := upstream.CheckCONNECT(a.ctx, a.cfg.UpstreamAddr(), a.cfg.ConnectTimeoutDuration(), tlsCfg, a.cfg.Upstream.Username, pw, target)
+	a.logCheckResult("CONNECT test", result)
 	return result
 }
 
@@ -274,40 +257,24 @@ func (a *App) TestHTTPGet(targetURL string) upstream.CheckResult {
 	if targetURL == "" {
 		targetURL = "http://example.com/"
 	}
-	cfg := a.cfg
-	pw, _ := keychain.LoadPassword(cfg.Upstream.Username)
-	tlsCfg := &tls.Config{
-		InsecureSkipVerify: !cfg.Upstream.VerifyTLS,
-		ServerName:         cfg.Upstream.Host,
+	pw, _ := keychain.LoadPassword(a.cfg.Upstream.Username)
+	tlsCfg, err := a.buildDiagTLS()
+	if err != nil {
+		return upstream.CheckResult{OK: false, Message: err.Error()}
 	}
-	if cfg.Upstream.CustomCAPath != "" {
-		pool, err := upstream.LoadCustomCA(cfg.Upstream.CustomCAPath)
-		if err != nil {
-			return upstream.CheckResult{OK: false, Message: err.Error()}
-		}
-		tlsCfg.RootCAs = pool
-	}
-	result := upstream.CheckHTTP(a.ctx, cfg.UpstreamAddr(), cfg.ConnectTimeoutDuration(), tlsCfg, cfg.Upstream.Username, pw, targetURL)
-	if result.OK {
-		a.log.Info("HTTP test passed: %s", result.Message)
-	} else {
-		a.log.Error("HTTP test failed: %s", result.Message)
-	}
+	result := upstream.CheckHTTP(a.ctx, a.cfg.UpstreamAddr(), a.cfg.ConnectTimeoutDuration(), tlsCfg, a.cfg.Upstream.Username, pw, targetURL)
+	a.logCheckResult("HTTP test", result)
 	return result
 }
 
 // --- File picker ---
 
 func (a *App) SelectCAFile() (string, error) {
-	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select CA Certificate PEM File",
 		Filters: []runtime.FileFilter{
 			{DisplayName: "PEM Files", Pattern: "*.pem;*.crt;*.cer"},
 			{DisplayName: "All Files", Pattern: "*"},
 		},
 	})
-	if err != nil {
-		return "", err
-	}
-	return path, nil
 }

@@ -37,9 +37,11 @@ func CheckProxyAuth(ctx context.Context, addr string, timeout time.Duration, tls
 	}
 	defer conn.Close()
 
-	// Send a minimal CONNECT to a safe target and check auth response
+	// Send a CONNECT to a non-routable test address (RFC 5737) to verify auth
+	// without depending on external DNS or connectivity.
+	const probeTarget = "192.0.2.1:443"
 	authHeader := BasicAuthHeader(username, password)
-	reqLine := fmt.Sprintf("CONNECT www.google.com:443 HTTP/1.1\r\nHost: www.google.com:443\r\nProxy-Authorization: %s\r\n\r\n", authHeader)
+	reqLine := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\n\r\n", probeTarget, probeTarget, authHeader)
 	if _, err := io.WriteString(conn, reqLine); err != nil {
 		return CheckResult{OK: false, Message: fmt.Sprintf("write failed: %v", err), Latency: time.Since(start).String()}
 	}
