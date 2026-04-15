@@ -37,8 +37,10 @@ func CheckProxyAuth(ctx context.Context, addr string, timeout time.Duration, tls
 	}
 	defer conn.Close()
 
-	// Send a CONNECT to a non-routable test address (RFC 5737) to verify auth
-	// without depending on external DNS or connectivity.
+	// Send a CONNECT to a non-routable address (RFC 5737). The proxy will
+	// check credentials before attempting to connect to the target, so:
+	//   407 → credentials are wrong
+	//   any other response (200, 502, 503, …) → credentials accepted
 	const probeTarget = "192.0.2.1:443"
 	authHeader := BasicAuthHeader(username, password)
 	reqLine := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\n\r\n", probeTarget, probeTarget, authHeader)
@@ -54,13 +56,16 @@ func CheckProxyAuth(ctx context.Context, addr string, timeout time.Duration, tls
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusOK {
-		return CheckResult{OK: true, Message: "Auth OK, CONNECT succeeded", Latency: elapsed.String()}
-	}
 	if resp.StatusCode == http.StatusProxyAuthRequired {
 		return CheckResult{OK: false, Message: "407 Proxy Authentication Required - check credentials", Latency: elapsed.String()}
 	}
-	return CheckResult{OK: false, Message: fmt.Sprintf("unexpected status: %d %s", resp.StatusCode, resp.Status), Latency: elapsed.String()}
+	// Any non-407 means the proxy accepted our credentials.
+	// 200 = target reachable, 502/503 = target unreachable but auth passed.
+	return CheckResult{
+		OK:      true,
+		Message: fmt.Sprintf("Auth OK (proxy responded %d %s)", resp.StatusCode, http.StatusText(resp.StatusCode)),
+		Latency: elapsed.String(),
+	}
 }
 
 func CheckCONNECT(ctx context.Context, addr string, timeout time.Duration, tlsCfg *tls.Config, username, password, targetHost string) CheckResult {
