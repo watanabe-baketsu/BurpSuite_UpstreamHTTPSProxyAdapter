@@ -27,6 +27,9 @@ func LoadPassword(username string) (string, error) {
 	return pw, nil
 }
 
+// DeletePassword removes the stored credential for the given username.
+// Used when switching profiles or cleaning up stale credentials.
+// Returns nil if the entry does not exist.
 func DeletePassword(username string) error {
 	if username == "" {
 		username = "_default"

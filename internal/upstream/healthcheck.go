@@ -55,11 +55,14 @@ func CheckProxyAuth(ctx context.Context, addr string, timeout time.Duration, tls
 	defer conn.Close()
 	setDeadline(conn, timeout)
 
-	// Send a CONNECT to a non-routable address (RFC 5737). The proxy checks
-	// credentials before attempting to reach the target, so:
+	// Send a CONNECT to a well-known reachable host to verify auth.
+	// Using example.com (IANA reserved, always reachable) so the proxy
+	// can quickly establish the outbound connection and return a response.
+	// A non-routable address would cause the proxy to hang until its own
+	// connect_timeout, which is typically longer than our read deadline.
 	//   407 → credentials are wrong
-	//   any other response (200, 502, 503, …) → credentials accepted
-	const probeTarget = "192.0.2.1:443"
+	//   200 → credentials accepted, tunnel established
+	const probeTarget = "example.com:443"
 	authHeader := BasicAuthHeader(username, password)
 	req := fmt.Sprintf(
 		"CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\nConnection: close\r\n\r\n",

@@ -88,9 +88,8 @@ func (a *App) SaveConfig(dto ConfigDTO) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.server != nil && a.server.IsRunning() {
-		return fmt.Errorf("cannot save config while proxy is running — stop the proxy first")
-	}
+	// Config is always saveable. If the proxy is running, the saved config
+	// takes effect on next Start (the running server keeps its own copy).
 
 	newCfg := config.Config{
 		Upstream: config.UpstreamConfig{

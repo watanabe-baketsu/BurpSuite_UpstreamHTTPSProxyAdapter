@@ -102,6 +102,9 @@ function App() {
     setDiagnosticRunning(true);
     setDiagnosticResult(null);
     try {
+      // Save current GUI values to Go backend before running the test,
+      // so diagnostics always use the latest input.
+      await SaveConfig(config);
       const result = await fn();
       setDiagnosticResult(result);
     } catch (e) {

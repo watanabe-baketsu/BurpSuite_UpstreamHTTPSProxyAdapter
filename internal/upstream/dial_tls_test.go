@@ -121,14 +121,17 @@ func TestBuildTLSConfigCustomCAInvalid(t *testing.T) {
 	}
 }
 
-func TestLoadCustomCA(t *testing.T) {
+func TestBuildTLSConfigCustomCAPool(t *testing.T) {
 	caPath := writeTestCA(t)
 
-	pool, err := LoadCustomCA(caPath)
+	cfg, err := BuildTLSConfig(TLSConfig{
+		VerifyTLS: true,
+		CustomCA:  caPath,
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if pool == nil {
-		t.Fatal("expected non-nil pool")
+	if cfg.RootCAs == nil {
+		t.Fatal("expected non-nil RootCAs pool from custom CA")
 	}
 }

@@ -35,18 +35,6 @@ func BuildTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
-func LoadCustomCA(path string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read CA file: %w", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("no valid certificates found in: %s", path)
-	}
-	return pool, nil
-}
-
 func DialTLS(ctx context.Context, addr string, timeout time.Duration, tlsCfg *tls.Config) (net.Conn, error) {
 	dialer := &tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: timeout},
