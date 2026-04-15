@@ -81,10 +81,17 @@ jobs:
     env:
       APP_BUNDLE: "build/bin/${{ inputs.app-name }}.app"
       ENTITLEMENTS: "build/darwin/entitlements.plist"
-      KEYCHAIN_PATH: "${{ runner.temp }}/app-signing.keychain-db"
+      # KEYCHAIN_PATH is set in the "Set KEYCHAIN_PATH" step below
+      # (runner.temp is not available in job-level env)
       KEYCHAIN_PROFILE: "notarytool-profile"
 
     steps:
+      # ────────────────────────────────────────────────
+      # 0. Set KEYCHAIN_PATH (runner.temp is unavailable at job-level env)
+      # ────────────────────────────────────────────────
+      - name: Set KEYCHAIN_PATH
+        run: echo "KEYCHAIN_PATH=${RUNNER_TEMP}/app-signing.keychain-db" >> "${GITHUB_ENV}"
+
       # ────────────────────────────────────────────────
       # 1. Checkout
       # ────────────────────────────────────────────────
