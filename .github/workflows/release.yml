@@ -1,0 +1,198 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. v1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.23"
+  NODE_VERSION: "20"
+  WAILS_VERSION: "v2.11.0"
+  APP_NAME: "burp-upstream-adapter"
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 1. Validate the version tag format
+  # ──────────────────────────────────────────────
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version format
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::Version must match vX.Y.Z or vX.Y.Z-suffix (e.g. v1.0.0, v1.0.0-rc.1)"
+            exit 1
+          fi
+          echo "Version $VERSION is valid"
+
+  # ──────────────────────────────────────────────
+  # 2. Build on each platform natively
+  # ──────────────────────────────────────────────
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: darwin
+            arch: arm64
+            artifact: burp-upstream-adapter-darwin-arm64
+          - os: macos-13
+            platform: darwin
+            arch: amd64
+            artifact: burp-upstream-adapter-darwin-amd64
+          - os: windows-latest
+            platform: windows
+            arch: amd64
+            artifact: burp-upstream-adapter-windows-amd64
+          - os: ubuntu-22.04
+            platform: linux
+            arch: amd64
+            artifact: burp-upstream-adapter-linux-amd64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # --- Platform-specific dependencies ---
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.0-dev \
+            build-essential \
+            pkg-config
+
+      # --- Wails CLI ---
+
+      - name: Install Wails
+        shell: bash
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      # --- Tests (run on all platforms to catch platform-specific issues) ---
+
+      - name: Run tests
+        shell: bash
+        run: go test ./internal/... -v -count=1 -timeout 120s
+
+      # --- Build ---
+
+      - name: Wails build
+        shell: bash
+        run: wails build -platform ${{ matrix.platform }}/${{ matrix.arch }}
+
+      # --- Package ---
+
+      - name: Package (macOS)
+        if: matrix.platform == 'darwin'
+        run: |
+          cd build/bin
+          zip -r "../../${{ matrix.artifact }}.zip" "${{ env.APP_NAME }}.app"
+          echo "ASSET=${{ matrix.artifact }}.zip" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "build\bin\${{ env.APP_NAME }}.exe" -DestinationPath "${{ matrix.artifact }}.zip"
+          echo "ASSET=${{ matrix.artifact }}.zip" >> $env:GITHUB_ENV
+
+      - name: Package (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          cd build/bin
+          tar czf "../../${{ matrix.artifact }}.tar.gz" "${{ env.APP_NAME }}"
+          echo "ASSET=${{ matrix.artifact }}.tar.gz" >> "$GITHUB_ENV"
+
+      # --- Upload ---
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ env.ASSET }}
+          retention-days: 1
+
+  # ──────────────────────────────────────────────
+  # 3. Create tag + GitHub Release with all assets
+  # ──────────────────────────────────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh dist/
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
+          git push origin "${{ inputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: "Burp Upstream HTTPS Proxy Adapter ${{ inputs.version }}"
+          draft: false
+          prerelease: ${{ contains(inputs.version, '-') }}
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            ## Burp Upstream HTTPS Proxy Adapter ${{ inputs.version }}
+
+            A local proxy adapter that bridges Burp Suite to an upstream HTTPS proxy with Basic authentication.
+
+            ### Downloads
+
+            | Platform | Architecture | File |
+            |----------|-------------|------|
+            | macOS | Apple Silicon (arm64) | `burp-upstream-adapter-darwin-arm64.zip` |
+            | macOS | Intel (amd64) | `burp-upstream-adapter-darwin-amd64.zip` |
+            | Windows | x64 | `burp-upstream-adapter-windows-amd64.zip` |
+            | Linux | x64 | `burp-upstream-adapter-linux-amd64.tar.gz` |
+
+            ### Quick Start
+
+            1. Download and extract the archive for your platform
+            2. Run the application
+            3. Configure your upstream HTTPS proxy (host, port, username, password)
+            4. Click **Start Proxy**
+            5. In Burp Suite: Settings > Network > Connections > Upstream proxy servers > Add
+               - Destination host: `*`
+               - Proxy host: `127.0.0.1`
+               - Proxy port: `18080`
+               - Authentication type: None
