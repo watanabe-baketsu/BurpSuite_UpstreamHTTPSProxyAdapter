@@ -1,7 +1,9 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
+# ============================================================
+# Burp Upstream HTTPS Proxy Adapter - .gitignore
+# ============================================================
+
+# ------ Go ------
+# Binaries
 *.exe
 *.exe~
 *.dll
@@ -11,30 +13,62 @@
 # Test binary, built with `go test -c`
 *.test
 
-# Code coverage profiles and other test artifacts
+# Coverage profiles and test artifacts
 *.out
 coverage.*
 *.coverprofile
 profile.cov
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
+# Go workspace
 go.work
 go.work.sum
 
-# env file
-.env
+# Dependency vendoring (uncomment if vendoring)
+# vendor/
 
-# Editor/IDE
-.idea/
-.vscode/
-
-# Wails
+# ------ Wails / Frontend ------
+# Node dependencies
 frontend/node_modules/
+
+# Vite build output (rebuilt by `wails build` / `npm run build`)
 frontend/dist/
+
+# Wails checksum file (auto-generated, machine-specific)
+frontend/package.json.md5
+
+# Wails build output
 build/bin/
 
-# Config
+# ------ App config (runtime-generated, may contain user data) ------
 *.config.json
+
+# ------ Secrets / credentials (NEVER commit these) ------
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# ------ OS-generated junk ------
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+ehthumbs_vista.db
+*.lnk
+
+# ------ Editor / IDE ------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
