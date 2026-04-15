@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -101,9 +102,19 @@ func TestLocalAddr(t *testing.T) {
 	}
 }
 
+// setHomeDir overrides the home directory for the duration of the test.
+// On Windows os.UserHomeDir reads USERPROFILE, on Unix it reads HOME.
+func setHomeDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", dir)
+	}
+}
+
 func TestSaveLoad(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeDir(t, tmp)
 
 	cfg := Default()
 	cfg.Upstream.Host = "test-proxy.example.com"
@@ -134,7 +145,7 @@ func TestSaveLoad(t *testing.T) {
 
 func TestLoadReturnsDefaultWhenMissing(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeDir(t, tmp)
 
 	cfg, err := Load()
 	if err != nil {
