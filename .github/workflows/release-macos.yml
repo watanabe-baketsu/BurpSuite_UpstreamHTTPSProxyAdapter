@@ -1,0 +1,326 @@
+# ════════════════════════════════════════════════════════════════
+# macOS Build — Code-sign, Notarize, Staple
+# ════════════════════════════════════════════════════════════════
+# Reusable workflow called from release.yml.
+# Builds the Wails app on Apple Silicon & Intel runners, then
+# signs with Developer ID Application, notarizes via notarytool,
+# and staples the ticket into the .app bundle.
+#
+# Required GitHub Secrets (passed from caller):
+#   BUILD_CERTIFICATE_BASE64      - base64-encoded .p12 file
+#   P12_PASSWORD                  - password for the .p12
+#   KEYCHAIN_PASSWORD             - arbitrary password for temp keychain
+#   APPLE_ID                      - Apple ID email (notarization)
+#   APPLE_TEAM_ID                 - 10-char Apple Team ID
+#   APPLE_APP_SPECIFIC_PASSWORD   - app-specific password for notarytool
+# ════════════════════════════════════════════════════════════════
+
+name: "Build macOS (sign + notarize)"
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Semantic version tag (e.g. v1.0.0)"
+        required: true
+        type: string
+      go-version:
+        required: false
+        type: string
+        default: "1.23"
+      node-version:
+        required: false
+        type: string
+        default: "20"
+      wails-version:
+        required: false
+        type: string
+        default: "v2.11.0"
+      app-name:
+        description: "Name of the .app bundle (without .app extension)"
+        required: false
+        type: string
+        default: "burp-upstream-adapter"
+    secrets:
+      BUILD_CERTIFICATE_BASE64:
+        required: true
+      P12_PASSWORD:
+        required: true
+      KEYCHAIN_PASSWORD:
+        required: true
+      APPLE_ID:
+        required: true
+      APPLE_TEAM_ID:
+        required: true
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-sign-notarize:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest  → Apple Silicon (arm64) runner
+          - runner: macos-latest
+            arch: arm64
+            label: darwin-arm64
+          # macos-13      → Intel (amd64) runner
+          - runner: macos-13
+            arch: amd64
+            label: darwin-amd64
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    # ── 変数をまとめる ──────────────────────────────────
+    # APP_BUNDLE / ENTITLEMENTS のパスを変えれば別プロジェクトにも流用可能
+    env:
+      APP_BUNDLE: "build/bin/${{ inputs.app-name }}.app"
+      ENTITLEMENTS: "build/darwin/entitlements.plist"
+      KEYCHAIN_PATH: "${{ runner.temp }}/app-signing.keychain-db"
+      KEYCHAIN_PROFILE: "notarytool-profile"
+
+    steps:
+      # ────────────────────────────────────────────────
+      # 1. Checkout
+      # ────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ────────────────────────────────────────────────
+      # 2. Setup toolchains
+      # ────────────────────────────────────────────────
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ inputs.wails-version }}
+
+      # ────────────────────────────────────────────────
+      # 3. Run Go tests (platform-specific issues の早期発見)
+      # ────────────────────────────────────────────────
+      - name: Run Go tests
+        run: go test ./internal/... -v -count=1 -timeout 120s
+
+      # ════════════════════════════════════════════════
+      # 4. Developer ID 証明書のインポート
+      # ════════════════════════════════════════════════
+      # CI では GUI のキーチェーンアクセスが無いため、
+      # 一時キーチェーンを作成して .p12 をインポートする。
+      # set-key-partition-list が無いと codesign が
+      # "User interaction is not allowed" で失敗する。
+      - name: Import Developer ID certificate
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          CERT_PATH="${RUNNER_TEMP}/certificate.p12"
+
+          # 4-a. base64 → .p12 ファイルに復元
+          echo -n "${BUILD_CERTIFICATE_BASE64}" | base64 --decode -o "${CERT_PATH}"
+
+          # 4-b. 一時キーチェーンを作成
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+          # 4-c. キーチェーンの自動ロック猶予を 6 時間に設定
+          #      (ビルド中にロックされるのを防ぐ)
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+
+          # 4-d. キーチェーンをアンロック
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+          # 4-e. .p12 をインポート (-A は全アプリからアクセス許可)
+          security import "${CERT_PATH}" \
+            -P "${P12_PASSWORD}" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "${KEYCHAIN_PATH}"
+
+          # 4-f. パーティションリストを設定 (CI で必須)
+          #      これが無いと codesign が対話ダイアログを出そうとして失敗する
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "${KEYCHAIN_PASSWORD}" \
+            "${KEYCHAIN_PATH}"
+
+          # 4-g. 検索リストに一時キーチェーンを追加
+          #      login.keychain-db も残しておく (notarytool が使う)
+          security list-keychain -d user -s "${KEYCHAIN_PATH}" login.keychain-db
+
+          # 4-h. 署名 ID を取得して後続ステップへ渡す
+          SIGNING_IDENTITY=$(
+            security find-identity -v -p codesigning "${KEYCHAIN_PATH}" \
+              | awk -F'"' '/Developer ID Application/{print $2; exit}'
+          )
+          if [ -z "${SIGNING_IDENTITY}" ]; then
+            echo "::error::Developer ID Application certificate not found in keychain"
+            exit 1
+          fi
+          echo "Found identity: ${SIGNING_IDENTITY}"
+          echo "SIGNING_IDENTITY=${SIGNING_IDENTITY}" >> "${GITHUB_ENV}"
+
+      # ────────────────────────────────────────────────
+      # 5. Wails ビルド
+      # ────────────────────────────────────────────────
+      # -platform darwin/<arch> で .app バンドルを生成。
+      # ビルド成果物は build/bin/<app-name>.app に出力される。
+      - name: Wails build
+        run: wails build -platform "darwin/${{ matrix.arch }}"
+
+      # ════════════════════════════════════════════════
+      # 6. コード署名 (Developer ID Application)
+      # ════════════════════════════════════════════════
+      # --options runtime : Hardened Runtime を有効化 (notarization 必須)
+      # --timestamp       : Apple の TSA でタイムスタンプを付与
+      # --entitlements    : WebKit JIT 等の権限を付与
+      # --force           : 既存署名を上書き (Wails がアドホック署名している場合)
+      #
+      # 署名順序: 内側のバイナリ → .app バンドル (inside-out)
+      - name: Codesign the app bundle
+        run: |
+          set -euo pipefail
+
+          echo "── Signing inner binary ──"
+          codesign --force \
+            --options runtime \
+            --sign "${SIGNING_IDENTITY}" \
+            --timestamp \
+            --entitlements "${ENTITLEMENTS}" \
+            "${APP_BUNDLE}/Contents/MacOS/${{ inputs.app-name }}"
+
+          echo "── Signing .app bundle ──"
+          codesign --force \
+            --options runtime \
+            --sign "${SIGNING_IDENTITY}" \
+            --timestamp \
+            --entitlements "${ENTITLEMENTS}" \
+            "${APP_BUNDLE}"
+
+      # ────────────────────────────────────────────────
+      # 7. 署名の検証
+      # ────────────────────────────────────────────────
+      - name: Verify codesign
+        run: |
+          set -euo pipefail
+
+          echo "── codesign --verify ──"
+          codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}"
+
+          echo "── spctl assess (Gatekeeper) ──"
+          spctl --assess --type execute --verbose=2 "${APP_BUNDLE}" || true
+          # spctl は CI 環境で false-negative を返す場合があるため || true
+
+      # ════════════════════════════════════════════════
+      # 8. Notarization
+      # ════════════════════════════════════════════════
+
+      # 8-a. notarization 提出用の zip を ditto で作成
+      #      ditto は macOS ネイティブの zip ツールで、
+      #      リソースフォークや xattr を正しく保持する。
+      - name: Create zip for notarization
+        run: |
+          ditto -c -k --keepParent \
+            "${APP_BUNDLE}" \
+            "${RUNNER_TEMP}/notarization.zip"
+          echo "Created: ${RUNNER_TEMP}/notarization.zip"
+          ls -lh "${RUNNER_TEMP}/notarization.zip"
+
+      # 8-b. notarytool の認証情報をキーチェーンに保存
+      #      submit で毎回パスワードを渡さなくて済む。
+      - name: Store notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "${KEYCHAIN_PROFILE}" \
+            --apple-id "${APPLE_ID}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --password "${APPLE_APP_SPECIFIC_PASSWORD}"
+
+      # 8-c. Apple に提出して完了を待つ
+      #      --wait で完了まで同期的にポーリングする。
+      #      失敗時はログを取得して原因を表示する。
+      - name: Submit for notarization
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+
+          echo "── Submitting to Apple notary service ──"
+          SUBMIT_OUTPUT=$(
+            xcrun notarytool submit "${RUNNER_TEMP}/notarization.zip" \
+              --keychain-profile "${KEYCHAIN_PROFILE}" \
+              --wait 2>&1
+          )
+          echo "${SUBMIT_OUTPUT}"
+
+          # 提出 ID を抽出 (失敗時のログ取得に使用)
+          SUBMISSION_ID=$(echo "${SUBMIT_OUTPUT}" | awk '/id:/{print $2; exit}')
+
+          # ステータス判定
+          if echo "${SUBMIT_OUTPUT}" | grep -q "status: Invalid"; then
+            echo "::error::Notarization failed — fetching detailed log"
+            xcrun notarytool log "${SUBMISSION_ID}" \
+              --keychain-profile "${KEYCHAIN_PROFILE}" || true
+            exit 1
+          fi
+
+          echo "Notarization succeeded (submission: ${SUBMISSION_ID})"
+
+      # 8-d. notarization チケットを .app に staple
+      - name: Staple notarization ticket
+        run: xcrun stapler staple "${APP_BUNDLE}"
+
+      # 8-e. staple の検証
+      - name: Validate staple
+        run: xcrun stapler validate "${APP_BUNDLE}"
+
+      # ════════════════════════════════════════════════
+      # 9. 配布用 zip の作成 (staple 済み .app から再作成)
+      # ════════════════════════════════════════════════
+      - name: Create distribution zip
+        run: |
+          ARTIFACT_NAME="${{ inputs.app-name }}-${{ matrix.label }}"
+          ditto -c -k --keepParent \
+            "${APP_BUNDLE}" \
+            "${ARTIFACT_NAME}.zip"
+          echo "ASSET_PATH=${ARTIFACT_NAME}.zip" >> "${GITHUB_ENV}"
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> "${GITHUB_ENV}"
+          ls -lh "${ARTIFACT_NAME}.zip"
+
+      # ────────────────────────────────────────────────
+      # 10. Artifact アップロード
+      # ────────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ASSET_PATH }}
+          retention-days: 3
+
+      # ════════════════════════════════════════════════
+      # 11. クリーンアップ (常に実行)
+      # ════════════════════════════════════════════════
+      # 一時キーチェーンと .p12 を削除してランナーに証明書を残さない。
+      - name: Cleanup keychain and certificate
+        if: always()
+        run: |
+          security delete-keychain "${KEYCHAIN_PATH}" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/certificate.p12"
+          rm -f "${RUNNER_TEMP}/notarization.zip"

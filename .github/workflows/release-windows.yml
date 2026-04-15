@@ -1,0 +1,82 @@
+# ════════════════════════════════════════════════════════════════
+# Windows Build
+# ════════════════════════════════════════════════════════════════
+# Reusable workflow called from release.yml.
+# Builds the Wails app on Windows and uploads the zip artifact.
+# ════════════════════════════════════════════════════════════════
+
+name: "Build Windows"
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      go-version:
+        required: false
+        type: string
+        default: "1.23"
+      node-version:
+        required: false
+        type: string
+        default: "20"
+      wails-version:
+        required: false
+        type: string
+        default: "v2.11.0"
+      app-name:
+        required: false
+        type: string
+        default: "burp-upstream-adapter"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install Wails CLI
+        shell: bash
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ inputs.wails-version }}
+
+      - name: Run Go tests
+        shell: bash
+        run: go test ./internal/... -v -count=1 -timeout 120s
+
+      - name: Wails build
+        shell: bash
+        run: wails build -platform windows/amd64
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $artifact = "${{ inputs.app-name }}-windows-amd64"
+          Compress-Archive `
+            -Path "build\bin\${{ inputs.app-name }}.exe" `
+            -DestinationPath "${artifact}.zip"
+          echo "ARTIFACT_NAME=${artifact}" >> $env:GITHUB_ENV
+          echo "ASSET_PATH=${artifact}.zip" >> $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ASSET_PATH }}
+          retention-days: 3

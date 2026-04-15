@@ -1,0 +1,87 @@
+# ════════════════════════════════════════════════════════════════
+# Linux Build
+# ════════════════════════════════════════════════════════════════
+# Reusable workflow called from release.yml.
+# Builds the Wails app on Linux and uploads the tar.gz artifact.
+# ════════════════════════════════════════════════════════════════
+
+name: "Build Linux"
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      go-version:
+        required: false
+        type: string
+        default: "1.23"
+      node-version:
+        required: false
+        type: string
+        default: "20"
+      wails-version:
+        required: false
+        type: string
+        default: "v2.11.0"
+      app-name:
+        required: false
+        type: string
+        default: "burp-upstream-adapter"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.0-dev \
+            build-essential \
+            pkg-config
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ inputs.wails-version }}
+
+      - name: Run Go tests
+        run: go test ./internal/... -v -count=1 -timeout 120s
+
+      - name: Wails build
+        run: wails build -platform linux/amd64
+
+      - name: Package
+        run: |
+          ARTIFACT="${{ inputs.app-name }}-linux-amd64"
+          cd build/bin
+          tar czf "../../${ARTIFACT}.tar.gz" "${{ inputs.app-name }}"
+          cd ../..
+          echo "ARTIFACT_NAME=${ARTIFACT}" >> "${GITHUB_ENV}"
+          echo "ASSET_PATH=${ARTIFACT}.tar.gz" >> "${GITHUB_ENV}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ASSET_PATH }}
+          retention-days: 3
