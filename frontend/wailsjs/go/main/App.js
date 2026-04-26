@@ -6,6 +6,18 @@ export function ClearLogs() {
   return window['go']['main']['App']['ClearLogs']();
 }
 
+export function CreateProfile(arg1) {
+  return window['go']['main']['App']['CreateProfile'](arg1);
+}
+
+export function DeleteProfile(arg1) {
+  return window['go']['main']['App']['DeleteProfile'](arg1);
+}
+
+export function DuplicateProfile(arg1, arg2) {
+  return window['go']['main']['App']['DuplicateProfile'](arg1, arg2);
+}
+
 export function GetConfig() {
   return window['go']['main']['App']['GetConfig']();
 }
@@ -22,12 +34,20 @@ export function GetStatus() {
   return window['go']['main']['App']['GetStatus']();
 }
 
-export function SaveConfig(arg1) {
-  return window['go']['main']['App']['SaveConfig'](arg1);
+export function ListProfiles() {
+  return window['go']['main']['App']['ListProfiles']();
 }
 
-export function SelectCAFile() {
-  return window['go']['main']['App']['SelectCAFile']();
+export function LoadCAPEMFromFile() {
+  return window['go']['main']['App']['LoadCAPEMFromFile']();
+}
+
+export function RenameProfile(arg1, arg2) {
+  return window['go']['main']['App']['RenameProfile'](arg1, arg2);
+}
+
+export function SaveConfig(arg1) {
+  return window['go']['main']['App']['SaveConfig'](arg1);
 }
 
 export function StartProxy() {
@@ -36,6 +56,10 @@ export function StartProxy() {
 
 export function StopProxy() {
   return window['go']['main']['App']['StopProxy']();
+}
+
+export function SwitchProfile(arg1) {
+  return window['go']['main']['App']['SwitchProfile'](arg1);
 }
 
 export function TestCONNECT(arg1) {

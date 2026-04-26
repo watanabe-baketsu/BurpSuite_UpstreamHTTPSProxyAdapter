@@ -8,12 +8,11 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
-	"os"
 	"testing"
 	"time"
 )
 
-func generateTestCAPEM(t *testing.T) string {
+func generateTestCAPEM(t *testing.T) []byte {
 	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -22,12 +21,12 @@ func generateTestCAPEM(t *testing.T) string {
 	}
 
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{Organization: []string{"Test CA"}},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		IsCA:         true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{Organization: []string{"Test CA"}},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 
@@ -36,21 +35,7 @@ func generateTestCAPEM(t *testing.T) string {
 		t.Fatal(err)
 	}
 
-	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
-}
-
-func writeTestCA(t *testing.T) string {
-	t.Helper()
-	caContent := generateTestCAPEM(t)
-	tmpFile, err := os.CreateTemp(t.TempDir(), "ca-*.pem")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tmpFile.WriteString(caContent); err != nil {
-		t.Fatal(err)
-	}
-	tmpFile.Close()
-	return tmpFile.Name()
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 }
 
 func TestBuildTLSConfigInsecure(t *testing.T) {
@@ -83,11 +68,11 @@ func TestBuildTLSConfigSecure(t *testing.T) {
 }
 
 func TestBuildTLSConfigCustomCA(t *testing.T) {
-	caPath := writeTestCA(t)
+	caPEM := generateTestCAPEM(t)
 
 	cfg, err := BuildTLSConfig(TLSConfig{
-		VerifyTLS: true,
-		CustomCA:  caPath,
+		VerifyTLS:   true,
+		CustomCAPEM: caPEM,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -97,36 +82,22 @@ func TestBuildTLSConfigCustomCA(t *testing.T) {
 	}
 }
 
-func TestBuildTLSConfigCustomCANotFound(t *testing.T) {
-	_, err := BuildTLSConfig(TLSConfig{
-		VerifyTLS: true,
-		CustomCA:  "/nonexistent/ca.pem",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing CA file")
-	}
-}
-
 func TestBuildTLSConfigCustomCAInvalid(t *testing.T) {
-	tmpFile, _ := os.CreateTemp(t.TempDir(), "bad-ca-*.pem")
-	tmpFile.WriteString("not a valid PEM")
-	tmpFile.Close()
-
 	_, err := BuildTLSConfig(TLSConfig{
-		VerifyTLS: true,
-		CustomCA:  tmpFile.Name(),
+		VerifyTLS:   true,
+		CustomCAPEM: []byte("not a valid PEM"),
 	})
 	if err == nil {
-		t.Fatal("expected error for invalid CA file")
+		t.Fatal("expected error for invalid CA PEM")
 	}
 }
 
 func TestBuildTLSConfigCustomCAPool(t *testing.T) {
-	caPath := writeTestCA(t)
+	caPEM := generateTestCAPEM(t)
 
 	cfg, err := BuildTLSConfig(TLSConfig{
-		VerifyTLS: true,
-		CustomCA:  caPath,
+		VerifyTLS:   true,
+		CustomCAPEM: caPEM,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

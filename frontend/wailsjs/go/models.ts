@@ -47,12 +47,13 @@ export namespace logging {
 export namespace main {
 	
 	export class ConfigDTO {
+	    active_profile: string;
 	    upstream_host: string;
 	    upstream_port: number;
 	    username: string;
 	    password: string;
 	    verify_tls: boolean;
-	    custom_ca_path: string;
+	    custom_ca_pem: string;
 	    connect_timeout: number;
 	    idle_timeout: number;
 	    bind_host: string;
@@ -64,16 +65,29 @@ export namespace main {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.active_profile = source["active_profile"];
 	        this.upstream_host = source["upstream_host"];
 	        this.upstream_port = source["upstream_port"];
 	        this.username = source["username"];
 	        this.password = source["password"];
 	        this.verify_tls = source["verify_tls"];
-	        this.custom_ca_path = source["custom_ca_path"];
+	        this.custom_ca_pem = source["custom_ca_pem"];
 	        this.connect_timeout = source["connect_timeout"];
 	        this.idle_timeout = source["idle_timeout"];
 	        this.bind_host = source["bind_host"];
 	        this.bind_port = source["bind_port"];
+	    }
+	}
+	export class ProfileSummary {
+	    name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProfileSummary(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
 	    }
 	}
 

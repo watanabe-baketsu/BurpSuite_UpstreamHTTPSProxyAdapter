@@ -118,23 +118,21 @@ func parseHostPort(rawURL string) (string, int) {
 func setupAdapter(t *testing.T, upstreamServer *httptest.Server, username, password string) (string, func()) {
 	upHost, upPort := parseHostPort(upstreamServer.URL)
 
-	cfg := config.Config{
-		Upstream: config.UpstreamConfig{
-			Host:           upHost,
-			Port:           upPort,
-			Username:       username,
-			VerifyTLS:      false,
-			ConnectTimeout: 10,
-			IdleTimeout:    30,
-		},
-		Local: config.LocalConfig{
-			BindHost: "127.0.0.1",
-			BindPort: 0, // OS assigns a free port
-		},
+	profile := config.ProfileConfig{
+		Host:           upHost,
+		Port:           upPort,
+		Username:       username,
+		VerifyTLS:      false,
+		ConnectTimeout: 10,
+		IdleTimeout:    30,
+	}
+	local := config.LocalConfig{
+		BindHost: "127.0.0.1",
+		BindPort: 0, // OS assigns a free port
 	}
 
 	log := logging.New(100)
-	srv, err := adapter.NewServer(cfg, username, password, log)
+	srv, err := adapter.NewServer(profile, local, username, password, log)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
@@ -266,16 +264,14 @@ func TestHTTPForwarding(t *testing.T) {
 }
 
 func TestServerStartStop(t *testing.T) {
-	cfg := config.Config{
-		Upstream: config.UpstreamConfig{
-			Host: "127.0.0.1", Port: 9999,
-			VerifyTLS: false, ConnectTimeout: 5, IdleTimeout: 30,
-		},
-		Local: config.LocalConfig{BindHost: "127.0.0.1", BindPort: 0},
+	profile := config.ProfileConfig{
+		Host: "127.0.0.1", Port: 9999,
+		VerifyTLS: false, ConnectTimeout: 5, IdleTimeout: 30,
 	}
+	local := config.LocalConfig{BindHost: "127.0.0.1", BindPort: 0}
 
 	log := logging.New(100)
-	srv, err := adapter.NewServer(cfg, "user", "pass", log)
+	srv, err := adapter.NewServer(profile, local, "user", "pass", log)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -310,16 +306,14 @@ func TestServerStartStop(t *testing.T) {
 }
 
 func TestMetricsSnapshot(t *testing.T) {
-	cfg := config.Config{
-		Upstream: config.UpstreamConfig{
-			Host: "127.0.0.1", Port: 9999,
-			VerifyTLS: false, ConnectTimeout: 5, IdleTimeout: 30,
-		},
-		Local: config.LocalConfig{BindHost: "127.0.0.1", BindPort: 0},
+	profile := config.ProfileConfig{
+		Host: "127.0.0.1", Port: 9999,
+		VerifyTLS: false, ConnectTimeout: 5, IdleTimeout: 30,
 	}
+	local := config.LocalConfig{BindHost: "127.0.0.1", BindPort: 0}
 
 	log := logging.New(100)
-	srv, _ := adapter.NewServer(cfg, "", "", log)
+	srv, _ := adapter.NewServer(profile, local, "", "", log)
 
 	m := srv.GetMetrics()
 	if m.ActiveConnections != 0 || m.TotalRequests != 0 {

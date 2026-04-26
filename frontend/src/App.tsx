@@ -2,17 +2,32 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 import {
   GetConfig, SaveConfig, StartProxy, StopProxy, GetStatus,
-  GetMetrics, GetLogs, ClearLogs, SelectCAFile,
+  GetMetrics, GetLogs, ClearLogs, LoadCAPEMFromFile,
   TestUpstreamTLS, TestProxyAuth, TestCONNECT, TestHTTPGet,
+  ListProfiles, SwitchProfile, CreateProfile, DuplicateProfile, DeleteProfile, RenameProfile,
 } from '../wailsjs/go/main/App';
-import type { ConfigDTO, MetricsSnapshot, LogEntry, CheckResult } from './types';
+import type { ConfigDTO, MetricsSnapshot, LogEntry, CheckResult, ProfileSummary } from './types';
+
+const PROFILE_NAME_REGEX = /^[A-Za-z0-9_-]{1,32}$/;
+const PROFILE_NAME_ERROR = 'Profile name: 1-32 chars, letters/digits/hyphen/underscore only';
+
+const emptyConfig: ConfigDTO = {
+  active_profile: 'default',
+  upstream_host: '', upstream_port: 3128, username: '', password: '',
+  verify_tls: true, custom_ca_pem: '', connect_timeout: 30,
+  idle_timeout: 300, bind_host: '127.0.0.1', bind_port: 18080,
+};
+
+type ProfileDialog =
+  | { kind: 'none' }
+  | { kind: 'create' }
+  | { kind: 'duplicate' }
+  | { kind: 'rename'; from: string }
+  | { kind: 'delete'; name: string };
 
 function App() {
-  const [config, setConfig] = useState<ConfigDTO>({
-    upstream_host: '', upstream_port: 3128, username: '', password: '',
-    verify_tls: true, custom_ca_path: '', connect_timeout: 30,
-    idle_timeout: 300, bind_host: '127.0.0.1', bind_port: 18080,
-  });
+  const [config, setConfig] = useState<ConfigDTO>(emptyConfig);
+  const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [status, setStatus] = useState<'running' | 'stopped'>('stopped');
   const [metrics, setMetrics] = useState<MetricsSnapshot>({
     active_connections: 0, total_requests: 0, bytes_in: 0, bytes_out: 0, last_error: '',
@@ -23,14 +38,26 @@ function App() {
   const [saveMsg, setSaveMsg] = useState('');
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<'config' | 'diagnostics' | 'activity' | 'help'>('config');
+  const [profileDialog, setProfileDialog] = useState<ProfileDialog>({ kind: 'none' });
+  const [profileNameInput, setProfileNameInput] = useState('');
   const logEndRef = useRef<HTMLDivElement>(null);
   const logIdRef = useRef(0);
+
+  const refreshProfiles = useCallback(async () => {
+    try {
+      const list = await ListProfiles();
+      setProfiles(list);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
 
   useEffect(() => {
     GetConfig().then(setConfig).catch(e => setError(String(e)));
     GetStatus().then(s => setStatus(s as 'running' | 'stopped'));
     GetLogs().then(setLogs);
-  }, []);
+    refreshProfiles();
+  }, [refreshProfiles]);
 
   useEffect(() => {
     EventsOn('log', (entry: LogEntry) => {
@@ -89,10 +116,87 @@ function App() {
     }
   };
 
-  const handleSelectCA = async () => {
+  // Profile: switch active. Refreshes profiles list before updating the form
+  // so the dropdown's active flag never disagrees with the form contents.
+  const handleSwitchProfile = async (name: string) => {
+    if (name === config.active_profile) return;
     try {
-      const path = await SelectCAFile();
-      if (path) setConfig(c => ({ ...c, custom_ca_path: path }));
+      if (status === 'running') {
+        const ok = window.confirm(
+          `Proxy is running. Stop it and switch to "${name}"?`
+        );
+        if (!ok) return;
+        await StopProxy();
+      }
+      const next = await SwitchProfile(name);
+      await refreshProfiles();
+      setConfig(next);
+      setError('');
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  // Profile: create dialog actions
+  const openCreateProfile = () => {
+    setProfileNameInput('');
+    setProfileDialog({ kind: 'create' });
+  };
+
+  const openDuplicateProfile = () => {
+    setProfileNameInput(`${config.active_profile}-copy`);
+    setProfileDialog({ kind: 'duplicate' });
+  };
+
+  const openRenameProfile = () => {
+    setProfileNameInput(config.active_profile);
+    setProfileDialog({ kind: 'rename', from: config.active_profile });
+  };
+
+  const openDeleteProfile = () => {
+    if (profiles.length <= 1) {
+      setError('Cannot delete the last remaining profile');
+      return;
+    }
+    setProfileDialog({ kind: 'delete', name: config.active_profile });
+  };
+
+  const closeProfileDialog = () => {
+    setProfileDialog({ kind: 'none' });
+    setProfileNameInput('');
+  };
+
+  const confirmProfileDialog = async () => {
+    if (profileDialog.kind === 'none') return;
+    // Create/duplicate/rename all need a valid name; delete does not.
+    if (profileDialog.kind !== 'delete' && !PROFILE_NAME_REGEX.test(profileNameInput)) {
+      setError(PROFILE_NAME_ERROR);
+      return;
+    }
+    try {
+      let next: ConfigDTO;
+      if (profileDialog.kind === 'create') {
+        next = await CreateProfile(profileNameInput);
+      } else if (profileDialog.kind === 'duplicate') {
+        next = await DuplicateProfile(config.active_profile, profileNameInput);
+      } else if (profileDialog.kind === 'rename') {
+        next = await RenameProfile(profileDialog.from, profileNameInput);
+      } else {
+        next = await DeleteProfile(profileDialog.name);
+      }
+      await refreshProfiles();
+      setConfig(next);
+      setError('');
+      closeProfileDialog();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleLoadCA = async () => {
+    try {
+      const pem = await LoadCAPEMFromFile();
+      if (pem) setConfig(c => ({ ...c, custom_ca_pem: pem }));
     } catch (e) {
       setError(String(e));
     }
@@ -118,11 +222,24 @@ function App() {
     setConfig(c => ({ ...c, [key]: value }));
   };
 
+  const caBytes = config.custom_ca_pem?.length ?? 0;
+
   return (
     <div className="app">
       <header className="app-header">
         <h1>Burp Upstream HTTPS Proxy Adapter</h1>
         <div className="header-status">
+          <div className="profile-selector">
+            <span className="profile-selector-label">Profile</span>
+            <select
+              value={config.active_profile}
+              onChange={e => handleSwitchProfile(e.target.value)}
+            >
+              {profiles.map(p => (
+                <option key={p.name} value={p.name}>{p.name}</option>
+              ))}
+            </select>
+          </div>
           <span className={`status-badge ${status}`}>{status.toUpperCase()}</span>
           {status === 'running' && (
             <span className="metric-badge">{metrics.active_connections} conn | {metrics.total_requests} req</span>
@@ -145,6 +262,18 @@ function App() {
       <main className="content">
         {activeTab === 'config' && (
           <div className="config-panel">
+            <section className="section">
+              <h2>Profile</h2>
+              <div className="profile-actions">
+                <span className="section-hint">Active: <strong>{config.active_profile}</strong> ({profiles.length} total)</span>
+                <span className="spacer" />
+                <button className="btn-small" onClick={openCreateProfile}>New</button>
+                <button className="btn-small" onClick={openDuplicateProfile}>Duplicate</button>
+                <button className="btn-small" onClick={openRenameProfile}>Rename</button>
+                <button className="btn-small" onClick={openDeleteProfile} disabled={profiles.length <= 1}>Delete</button>
+              </div>
+            </section>
+
             <section className="section">
               <h2>Upstream Proxy</h2>
               <div className="form-grid">
@@ -175,13 +304,20 @@ function App() {
                 </label>
                 <label>Custom CA PEM
                   <div className="file-picker">
-                    <input type="text" value={config.custom_ca_path} readOnly
+                    <input type="text"
+                      value={caBytes > 0 ? `Loaded (${caBytes} bytes, stored in profile)` : ''}
+                      readOnly
                       placeholder="(optional)" />
-                    <button onClick={handleSelectCA}>Browse</button>
-                    {config.custom_ca_path && (
-                      <button onClick={() => updateField('custom_ca_path', '')}>Clear</button>
+                    <button onClick={handleLoadCA}>Load</button>
+                    {caBytes > 0 && (
+                      <button onClick={() => updateField('custom_ca_pem', '')}>Clear</button>
                     )}
                   </div>
+                  <span className={`ca-pem-indicator ${caBytes > 0 ? 'loaded' : ''}`}>
+                    {caBytes > 0
+                      ? 'PEM content is embedded in the profile — no external file required'
+                      : 'Load a .pem/.crt/.cer file; the content is copied into the profile'}
+                  </span>
                 </label>
                 <label>Connect Timeout (sec)
                   <input type="number" value={config.connect_timeout}
@@ -196,6 +332,7 @@ function App() {
 
             <section className="section">
               <h2>Local Listener</h2>
+              <p className="section-hint">Shared across profiles</p>
               <div className="form-grid">
                 <label>Bind Host
                   <input type="text" value={config.bind_host}
@@ -225,7 +362,7 @@ function App() {
           <div className="diagnostics-panel">
             <section className="section">
               <h2>Connection Tests</h2>
-              <p className="section-hint">Save config before running tests. Tests use current settings.</p>
+              <p className="section-hint">Save config before running tests. Tests use the active profile.</p>
               <div className="diag-buttons">
                 <button disabled={diagnosticRunning}
                   onClick={() => runDiagnostic(TestUpstreamTLS)}>
@@ -260,7 +397,7 @@ function App() {
 
         {activeTab === 'activity' && (
           <div className="activity-panel">
-            <section className="section metrics-section">
+            <section className="section">
               <h2>Metrics</h2>
               <div className="metrics-grid">
                 <div className="metric"><span className="metric-label">Active Connections</span><span className="metric-value">{metrics.active_connections}</span></div>
@@ -332,6 +469,74 @@ function App() {
           </div>
         )}
       </main>
+
+      {profileDialog.kind !== 'none' && (
+        <ProfileModal
+          dialog={profileDialog}
+          nameInput={profileNameInput}
+          onNameChange={setProfileNameInput}
+          onCancel={closeProfileDialog}
+          onConfirm={confirmProfileDialog}
+        />
+      )}
+    </div>
+  );
+}
+
+interface ProfileModalProps {
+  dialog: ProfileDialog;
+  nameInput: string;
+  onNameChange: (v: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+function ProfileModal({ dialog, nameInput, onNameChange, onCancel, onConfirm }: ProfileModalProps) {
+  if (dialog.kind === 'none') return null;
+
+  // Per-kind copy keeps the modal's three render variants self-contained and
+  // avoids ternary chains that fall through to a default label.
+  const copy = (() => {
+    switch (dialog.kind) {
+      case 'create':    return { title: 'Create new profile',                  confirm: 'Create' };
+      case 'duplicate': return { title: 'Duplicate profile',                   confirm: 'Duplicate' };
+      case 'rename':    return { title: `Rename profile "${dialog.from}"`,     confirm: 'Rename' };
+      case 'delete':    return { title: `Delete profile "${dialog.name}"?`,    confirm: 'Delete' };
+    }
+  })();
+  const isDelete = dialog.kind === 'delete';
+
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h3>{copy.title}</h3>
+        {isDelete ? (
+          <p>
+            This removes the profile and its stored password from the OS keychain.
+            This cannot be undone.
+          </p>
+        ) : (
+          <>
+            <p>Profile name (1-32 chars, letters, digits, hyphen, underscore):</p>
+            <input
+              type="text"
+              value={nameInput}
+              onChange={e => onNameChange(e.target.value)}
+              autoFocus
+              onKeyDown={e => {
+                if (e.key === 'Enter') onConfirm();
+                if (e.key === 'Escape') onCancel();
+              }}
+            />
+          </>
+        )}
+        <div className="modal-actions">
+          <button className="btn-secondary" onClick={onCancel}>Cancel</button>
+          <button className={isDelete ? 'btn-danger' : 'btn-primary'} onClick={onConfirm}>
+            {copy.confirm}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

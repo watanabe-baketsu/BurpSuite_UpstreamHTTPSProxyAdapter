@@ -7,6 +7,12 @@ import {upstream} from '../models';
 
 export function ClearLogs():Promise<void>;
 
+export function CreateProfile(arg1:string):Promise<main.ConfigDTO>;
+
+export function DeleteProfile(arg1:string):Promise<main.ConfigDTO>;
+
+export function DuplicateProfile(arg1:string,arg2:string):Promise<main.ConfigDTO>;
+
 export function GetConfig():Promise<main.ConfigDTO>;
 
 export function GetLogs():Promise<Array<logging.Entry>>;
@@ -15,13 +21,19 @@ export function GetMetrics():Promise<adapter.MetricsSnapshot>;
 
 export function GetStatus():Promise<string>;
 
-export function SaveConfig(arg1:main.ConfigDTO):Promise<void>;
+export function ListProfiles():Promise<Array<main.ProfileSummary>>;
 
-export function SelectCAFile():Promise<string>;
+export function LoadCAPEMFromFile():Promise<string>;
+
+export function RenameProfile(arg1:string,arg2:string):Promise<main.ConfigDTO>;
+
+export function SaveConfig(arg1:main.ConfigDTO):Promise<void>;
 
 export function StartProxy():Promise<void>;
 
 export function StopProxy():Promise<void>;
+
+export function SwitchProfile(arg1:string):Promise<main.ConfigDTO>;
 
 export function TestCONNECT(arg1:string):Promise<upstream.CheckResult>;
 

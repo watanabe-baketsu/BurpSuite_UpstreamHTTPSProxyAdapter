@@ -6,14 +6,17 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net"
-	"os"
 	"time"
 )
 
+// TLSConfig describes how to build an upstream TLS configuration.
+//
+// CustomCAPEM holds inline PEM bytes. The adapter no longer references a
+// file path at dial time: the PEM content is embedded in the saved config.
 type TLSConfig struct {
-	VerifyTLS  bool
-	CustomCA   string // PEM file path
-	ServerName string
+	VerifyTLS   bool
+	CustomCAPEM []byte
+	ServerName  string
 }
 
 func BuildTLSConfig(cfg TLSConfig) (*tls.Config, error) {
@@ -21,14 +24,10 @@ func BuildTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 		InsecureSkipVerify: !cfg.VerifyTLS,
 		ServerName:         cfg.ServerName,
 	}
-	if cfg.CustomCA != "" {
-		pem, err := os.ReadFile(cfg.CustomCA)
-		if err != nil {
-			return nil, fmt.Errorf("read CA file: %w", err)
-		}
+	if len(cfg.CustomCAPEM) > 0 {
 		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("no valid certificates in CA file: %s", cfg.CustomCA)
+		if !pool.AppendCertsFromPEM(cfg.CustomCAPEM) {
+			return nil, fmt.Errorf("no valid certificates in custom CA PEM")
 		}
 		tlsCfg.RootCAs = pool
 	}

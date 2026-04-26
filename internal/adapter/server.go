@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,7 +17,8 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
+	profile   config.ProfileConfig
+	local     config.LocalConfig
 	username  string
 	password  string
 	tlsCfg    *tls.Config
@@ -31,11 +33,14 @@ type Server struct {
 	running  bool
 }
 
-func NewServer(cfg config.Config, username, password string, log *logging.Logger) (*Server, error) {
+// NewServer builds a proxy server from a single profile plus the shared local
+// listener settings. The caller is responsible for supplying the password
+// already resolved from the keychain.
+func NewServer(profile config.ProfileConfig, local config.LocalConfig, username, password string, log *logging.Logger) (*Server, error) {
 	tlsCfg, err := upstream.BuildTLSConfig(upstream.TLSConfig{
-		VerifyTLS:  cfg.Upstream.VerifyTLS,
-		CustomCA:   cfg.Upstream.CustomCAPath,
-		ServerName: cfg.Upstream.Host,
+		VerifyTLS:   profile.VerifyTLS,
+		CustomCAPEM: []byte(profile.CustomCAPEM),
+		ServerName:  profile.Host,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build TLS config: %w", err)
@@ -43,7 +48,7 @@ func NewServer(cfg config.Config, username, password string, log *logging.Logger
 
 	proxyURL := &url.URL{
 		Scheme: "https",
-		Host:   cfg.UpstreamAddr(),
+		Host:   profile.UpstreamAddr(),
 		User:   url.UserPassword(username, password),
 	}
 
@@ -53,7 +58,8 @@ func NewServer(cfg config.Config, username, password string, log *logging.Logger
 	}
 
 	return &Server{
-		cfg:       cfg,
+		profile:   profile,
+		local:     local,
 		username:  username,
 		password:  password,
 		tlsCfg:    tlsCfg,
@@ -61,6 +67,11 @@ func NewServer(cfg config.Config, username, password string, log *logging.Logger
 		metrics:   NewMetrics(),
 		transport: transport,
 	}, nil
+}
+
+// localAddr returns the listener bind address.
+func (s *Server) localAddr() string {
+	return net.JoinHostPort(s.local.BindHost, strconv.Itoa(s.local.BindPort))
 }
 
 func (s *Server) Start() error {
@@ -71,7 +82,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("server already running")
 	}
 
-	addr := s.cfg.LocalAddr()
+	addr := s.localAddr()
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
@@ -82,10 +93,10 @@ func (s *Server) Start() error {
 	s.listener = listener
 
 	s.server = &http.Server{
-		Handler:     http.HandlerFunc(s.handleRequest),
-		ReadTimeout: s.cfg.ConnectTimeoutDuration(),
+		Handler:      http.HandlerFunc(s.handleRequest),
+		ReadTimeout:  s.profile.ConnectTimeoutDuration(),
 		WriteTimeout: 0, // No write timeout for tunnels
-		IdleTimeout:  s.cfg.IdleTimeoutDuration(),
+		IdleTimeout:  s.profile.IdleTimeoutDuration(),
 		BaseContext:  func(_ net.Listener) context.Context { return ctx },
 	}
 
