@@ -118,7 +118,13 @@ func (s *Server) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 
 	s.log.Debug("CONNECT tunnel established: %s", targetHost)
 
-	// Step 5: Bidirectional relay
+	// Step 5: Bidirectional relay. Register the tunnel so Server.Stop can
+	// force-close both halves; otherwise this relay survives shutdown
+	// indefinitely (http.Server.Shutdown deliberately ignores hijacked
+	// connections).
+	t := &tunnel{client: clientConn, upstream: upstreamConn}
+	release := s.registerTunnel(t)
+	defer release()
 	s.relay(clientConn, upstreamConn, br)
 }
 

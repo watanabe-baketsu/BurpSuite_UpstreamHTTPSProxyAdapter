@@ -131,6 +131,10 @@ func BuildTray(svc *App, app *application.App, tray *application.SystemTray, win
 	})
 
 	// ── Background tick: refresh metrics + error-driven icon state ──
+	// Cancellation is idempotent so callers can safely fire it from both
+	// onAppShutdown (early stop, before the proxy graceful-shutdown blocks)
+	// and the defer in main.go (final cleanup if the OnShutdown path was
+	// skipped, e.g. an unexpected exit).
 	ctx, cancelFn := context.WithCancel(context.Background())
 	go func() {
 		t := time.NewTicker(time.Second)
@@ -144,7 +148,8 @@ func BuildTray(svc *App, app *application.App, tray *application.SystemTray, win
 			}
 		}
 	}()
-	return cancelFn
+	var stopOnce sync.Once
+	return func() { stopOnce.Do(cancelFn) }
 }
 
 // handleStartStop toggles the proxy from the tray menu. Errors are surfaced
@@ -169,15 +174,22 @@ func statusLabels(running bool, port int) (statusLabel, actionLabel string) {
 	return "Status: Stopped", "Start Proxy"
 }
 
-// refreshStatus updates the start/stop label, the status row, and the icon
-// state in one place. Called both from the status observer and from the
-// metrics tick (because error freshness can flip the icon without a status
-// change).
+// refreshStatus updates the start/stop label and the status row.
+//
+// We deliberately do NOT call ui.menu.Update() here. On macOS Wails v3
+// alpha.78 (menu_darwin.go), Menu.Update() is implemented as
+// `[NSMenu removeAllItems]` followed by recreating every NSMenuItem from
+// scratch — i.e. a full menu rebuild. Doing that on every label change
+// races against the user's tray-menu interaction (clearMenu can fire while
+// the popup is being displayed) and is a major contributor to the
+// "tray icon frozen, can't quit" symptom. Each MenuItem.SetLabel already
+// dispatches the title change to the main thread internally
+// (menuitem_darwin.go: setMenuItemLabel uses dispatch_async), so the menu
+// updates without a full rebuild.
 func (ui *trayUI) refreshStatus(svc *App, running bool) {
 	statusLabel, actionLabel := statusLabels(running, svc.boundPort())
 	ui.statusItem.SetLabel(statusLabel)
 	ui.startStopItem.SetLabel(actionLabel)
-	ui.menu.Update()
 }
 
 // metricLabels returns (connections row, total requests row) so the
@@ -203,9 +215,18 @@ func trayTooltip(running bool, port int, lastError string, lastErrorAt time.Time
 	}
 }
 
-// refreshMetrics polls the proxy metrics and updates the menu labels and
-// icon. Runs on a 1-second ticker; uses in-place SetLabel to avoid the
-// SetMenu rebuild crash on Windows reported in wailsapp/wails#5227.
+// refreshMetrics polls the proxy metrics and updates the menu labels.
+// Runs on a 1-second ticker.
+//
+// SetLabel is sufficient — it dispatches each title update to the main
+// thread asynchronously. menu.Update() is intentionally NOT called: on
+// macOS Wails v3 alpha.78 it is a full destroy-and-rebuild of every
+// NSMenuItem, which races with menu display and breaks the tray UI under
+// load. See refreshStatus for the longer note.
+//
+// SetTooltip is a no-op on macOS (systemtray_darwin.go:setTooltip), but
+// SystemTray.SetTooltip still calls InvokeSync every time, blocking this
+// goroutine on a main-thread round-trip for nothing. Skip it on darwin.
 func (ui *trayUI) refreshMetrics(svc *App) {
 	m := svc.GetMetrics()
 	running := svc.GetStatus() == "running"
@@ -213,14 +234,10 @@ func (ui *trayUI) refreshMetrics(svc *App) {
 	connLabel, reqLabel := metricLabels(m.ActiveConnections, m.TotalRequests)
 	ui.connItem.SetLabel(connLabel)
 	ui.reqItem.SetLabel(reqLabel)
-	ui.menu.Update()
 
-	// Icon state — recompute every tick because error freshness expires.
-	// macOS uses a template image (single-colour); the running/stopped/error
-	// distinction there comes from a tooltip suffix until per-state template
-	// art is added. On Linux/Windows, swap the regular icon variant for one
-	// of three colour states (future enhancement: ship green/red variants).
-	ui.tray.SetTooltip(trayTooltip(running, svc.boundPort(), m.LastError, m.LastErrorAt))
+	if runtime.GOOS != "darwin" {
+		ui.tray.SetTooltip(trayTooltip(running, svc.boundPort(), m.LastError, m.LastErrorAt))
+	}
 }
 
 // errorIsFresh reports whether an error was recorded within the freshness

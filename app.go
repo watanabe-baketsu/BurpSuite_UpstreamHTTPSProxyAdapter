@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -37,6 +38,20 @@ type App struct {
 	obsMu            sync.Mutex
 	statusObservers  []func(running bool)
 	profileObservers []func(active string, profiles []string)
+
+	// shutdownHooks run from onAppShutdown BEFORE the proxy graceful-stop.
+	// The tray ticker registers its cancel function here so it stops poking
+	// the macOS main thread (InvokeSync round-trips) the moment the user
+	// asks to quit, instead of after app.Run() returns.
+	shutdownHooks []func()
+
+	// quitting is flipped to true the moment we *intend* to terminate the
+	// process (tray Quit, close-button when minimize-to-tray is off, etc.)
+	// so the WindowClosing hook can stop intercepting close events. Without
+	// this flag, [NSApp terminate:nil] would re-enter the hook, the hook
+	// would Cancel the close to "minimize to tray", and the termination
+	// would be vetoed — i.e. Quit would silently do nothing.
+	quitting atomic.Bool
 }
 
 // preferAccessoryActivation reports whether the app should launch as a macOS
@@ -101,14 +116,39 @@ func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) er
 	return nil
 }
 
+// addShutdownHook registers fn to run during onAppShutdown, before the
+// proxy graceful-stop. Used by the tray to cancel its background ticker
+// the instant the user requests quit, so it stops dispatching to the macOS
+// main thread while the rest of the shutdown sequence runs.
+func (a *App) addShutdownHook(fn func()) {
+	a.mu.Lock()
+	a.shutdownHooks = append(a.shutdownHooks, fn)
+	a.mu.Unlock()
+}
+
 // onAppShutdown is the application-level shutdown hook (registered on
-// Options.OnShutdown). It runs once when the app is exiting and stops the
-// proxy gracefully. Lowercase so it isn't bound to the frontend.
+// Options.OnShutdown). It runs once when the app is exiting.
+//
+// CRITICAL: we must not hold a.mu across server.Stop. server.Stop blocks
+// for up to 5 seconds waiting for in-flight connections to drain, and
+// during that window every other path that touches a.mu (tray ticker
+// GetMetrics/GetStatus, frontend RPC bindings, the Quit menu's status
+// query) would stall — exactly the "menu bar icon frozen" symptom users
+// see when they try to quit. Capture the server pointer + hooks under the
+// lock, release it, then do the slow work outside.
 func (a *App) onAppShutdown() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.server != nil && a.server.IsRunning() {
-		_ = a.server.Stop()
+	srv := a.server
+	hooks := a.shutdownHooks
+	a.shutdownHooks = nil
+	a.mu.Unlock()
+
+	for _, fn := range hooks {
+		fn()
+	}
+
+	if srv != nil && srv.IsRunning() {
+		_ = srv.Stop()
 	}
 }
 
@@ -666,7 +706,18 @@ func (a *App) ClearLogs() {
 // the WebviewWindow pointer directly). Quit stays exported because the
 // frontend may want to ask for a graceful exit from a UI element.
 
+// IsQuitting reports whether a Quit has been requested. The WindowClosing
+// hook reads this to bypass its hide-to-tray branch during termination.
+func (a *App) IsQuitting() bool {
+	return a.quitting.Load()
+}
+
+// Quit triggers an application-level shutdown. Setting the quitting flag
+// before delegating to a.app.Quit() ensures the WindowClosing hook lets
+// the resulting [NSApp terminate:nil] proceed without re-intercepting it
+// as a "minimize to tray".
 func (a *App) Quit() {
+	a.quitting.Store(true)
 	if a.app != nil {
 		a.app.Quit()
 	}

@@ -59,15 +59,32 @@ func main() {
 		URL:              "/",
 	})
 
-	// Intercept the close button so it can hide-to-tray when the user has
-	// opted in. Without that opt-in we fall through to the default close,
-	// which (with ApplicationShouldTerminateAfterLastWindowClosed=false on
-	// macOS) destroys the window but keeps the tray alive.
+	// Close-button policy:
+	//   * Already quitting (tray "Quit", Cmd-Q, etc.) → let the close run
+	//     so [NSApp terminate:nil] can finish.
+	//   * MinimizeToTrayOnClose=true  → hide the window, keep the tray alive.
+	//   * MinimizeToTrayOnClose=false → request an app-level Quit so the
+	//                                   tray icon disappears too.
+	//
+	// We need the explicit Quit because Mac.ApplicationShouldTerminateAfterLastWindowClosed
+	// is set to false (so the tray-only mode can keep running with no window).
+	// Without Quit, the default close would destroy the window but leave
+	// the app — and its tray icon — alive in the background.
 	window.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		if svc.IsQuitting() {
+			return
+		}
 		if svc.minimizeToTrayOnClose() {
 			window.Hide()
 			e.Cancel()
+			return
 		}
+		// Cancel the native close, then route through svc.Quit so the
+		// quitting flag is set before NSApp.terminate fires close again on
+		// this same window (which would otherwise re-enter this hook).
+		// Dispatched on a goroutine so the hook returns quickly.
+		e.Cancel()
+		go svc.Quit()
 	})
 
 	// macOS Dock icon click: bring the (possibly hidden) window back.
@@ -80,6 +97,12 @@ func main() {
 
 	tray := app.SystemTray.New()
 	stopTray := BuildTray(svc, app, tray, window)
+	// Stop the tray ticker as the very first step of shutdown so its
+	// 1-second loop stops dispatching to the macOS main thread while
+	// onAppShutdown is draining the proxy. The defer is the safety net for
+	// abnormal exits where OnShutdown is never invoked; stopTray is
+	// idempotent.
+	svc.addShutdownHook(stopTray)
 	defer stopTray()
 
 	if err := app.Run(); err != nil {

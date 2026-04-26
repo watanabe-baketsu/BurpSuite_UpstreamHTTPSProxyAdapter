@@ -14,7 +14,9 @@
         <key>CFBundleShortVersionString</key>
         <string>0.0.1</string>
         <key>CFBundleIconFile</key>
-        <string>iconfile</string>
+        <string>icons</string>
+        <key>CFBundleIconName</key>
+        <string>appicon</string>
         <key>LSMinimumSystemVersion</key>
         <string>10.15.0</string>
         <key>NSHighResolutionCapable</key>
