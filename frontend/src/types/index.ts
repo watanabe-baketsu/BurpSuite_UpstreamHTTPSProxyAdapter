@@ -1,14 +1,19 @@
 export interface ConfigDTO {
+  active_profile: string;
   upstream_host: string;
   upstream_port: number;
   username: string;
   password: string;
   verify_tls: boolean;
-  custom_ca_path: string;
+  custom_ca_pem: string;
   connect_timeout: number;
   idle_timeout: number;
   bind_host: string;
   bind_port: number;
+}
+
+export interface ProfileSummary {
+  name: string;
 }
 
 export interface MetricsSnapshot {

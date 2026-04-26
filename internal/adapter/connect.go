@@ -31,11 +31,11 @@ func (s *Server) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 
 	// Derive timeout context from the request context (which is cancelled on
 	// server shutdown via BaseContext), not from a stored s.ctx field.
-	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.ConnectTimeoutDuration())
+	ctx, cancel := context.WithTimeout(r.Context(), s.profile.ConnectTimeoutDuration())
 	defer cancel()
 
 	// Step 1: TLS-connect to upstream proxy
-	upstreamConn, err := upstream.DialTLS(ctx, s.cfg.UpstreamAddr(), s.cfg.ConnectTimeoutDuration(), s.tlsCfg)
+	upstreamConn, err := upstream.DialTLS(ctx, s.profile.UpstreamAddr(), s.profile.ConnectTimeoutDuration(), s.tlsCfg)
 	if err != nil {
 		errMsg := fmt.Sprintf("upstream TLS dial failed: %v", err)
 		s.log.Error(errMsg)
