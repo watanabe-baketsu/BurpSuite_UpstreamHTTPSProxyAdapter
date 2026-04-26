@@ -26,7 +26,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.transport.RoundTrip(outReq)
 	if err != nil {
 		errMsg := fmt.Sprintf("upstream request failed: %v", err)
-		s.log.Error(errMsg)
+		s.log.Error("%s", errMsg)
 		s.metrics.SetError(errMsg)
 		http.Error(w, errMsg, http.StatusBadGateway)
 		return

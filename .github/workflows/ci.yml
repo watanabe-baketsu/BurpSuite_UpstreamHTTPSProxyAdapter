@@ -16,8 +16,8 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.23"
-  NODE_VERSION: "20"
+  GO_VERSION: "1.25"
+  WAILS_VERSION: "v3.0.0-alpha.78"
 
 jobs:
   # ──────────────────────────────────────
@@ -49,37 +49,59 @@ jobs:
         run: go test ./internal/... -v -count=1 -timeout 120s -race
 
   # ──────────────────────────────────────
-  # Frontend: typecheck, build
+  # Frontend: bindings + typecheck + Vite build
   # ──────────────────────────────────────
   frontend:
     name: "Frontend build"
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # The wails3 CLI transitively imports v3/internal/operatingsystem which
+      # cgo-links to gtk+-3.0 / webkit2gtk on Linux, so `go install` fails
+      # without the dev headers in PKG_CONFIG_PATH. Match wails-build below.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            build-essential \
+            pkg-config
+
+      - name: Install Wails3 CLI
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+
+      - name: Generate frontend bindings
+        run: wails3 generate bindings -ts -d frontend/bindings -clean=true
 
       - name: Install dependencies
-        run: npm ci
+        working-directory: frontend
+        run: bun install --frozen-lockfile
 
       - name: TypeScript typecheck
-        run: npx tsc --noEmit
+        working-directory: frontend
+        run: bun x tsc --noEmit
 
       - name: Vite build
-        run: npm run build
+        working-directory: frontend
+        run: bun run build
 
   # ──────────────────────────────────────
-  # Wails: full build smoke test (Linux)
+  # Wails: full Linux build smoke-test (wails3 task linux:build)
   # ──────────────────────────────────────
   wails-build:
     name: "Wails build (Linux)"
@@ -95,24 +117,29 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          bun-version: latest
 
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libgtk-3-dev \
-            libwebkit2gtk-4.0-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
             build-essential \
             pkg-config
 
-      - name: Install Wails
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+      - name: Install Wails3 CLI
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
 
-      - name: Wails build
-        run: wails build -platform linux/amd64
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (wails3 task linux:build)
+        run: wails3 task linux:build

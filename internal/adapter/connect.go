@@ -38,7 +38,7 @@ func (s *Server) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	upstreamConn, err := upstream.DialTLS(ctx, s.profile.UpstreamAddr(), s.profile.ConnectTimeoutDuration(), s.tlsCfg)
 	if err != nil {
 		errMsg := fmt.Sprintf("upstream TLS dial failed: %v", err)
-		s.log.Error(errMsg)
+		s.log.Error("%s", errMsg)
 		s.metrics.SetError(errMsg)
 		http.Error(w, errMsg, http.StatusBadGateway)
 		return
@@ -52,7 +52,7 @@ func (s *Server) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.WriteString(upstreamConn, connectReq); err != nil {
 		upstreamConn.Close()
 		errMsg := fmt.Sprintf("upstream CONNECT write failed: %v", err)
-		s.log.Error(errMsg)
+		s.log.Error("%s", errMsg)
 		s.metrics.SetError(errMsg)
 		http.Error(w, errMsg, http.StatusBadGateway)
 		return
@@ -64,7 +64,7 @@ func (s *Server) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		upstreamConn.Close()
 		errMsg := fmt.Sprintf("upstream CONNECT response read failed: %v", err)
-		s.log.Error(errMsg)
+		s.log.Error("%s", errMsg)
 		s.metrics.SetError(errMsg)
 		http.Error(w, errMsg, http.StatusBadGateway)
 		return
@@ -72,7 +72,7 @@ func (s *Server) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode != http.StatusOK {
 		errMsg := fmt.Sprintf("upstream CONNECT rejected: %s", resp.Status)
-		s.log.Warn(errMsg)
+		s.log.Warn("%s", errMsg)
 		s.metrics.SetError(errMsg)
 		resp.Body.Close()
 

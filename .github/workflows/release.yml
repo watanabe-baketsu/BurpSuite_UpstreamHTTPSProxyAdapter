@@ -29,9 +29,8 @@ permissions:
   contents: write
 
 env:
-  GO_VERSION: "1.23"
-  NODE_VERSION: "20"
-  WAILS_VERSION: "v2.11.0"
+  GO_VERSION: "1.25"
+  WAILS_VERSION: "v3.0.0-alpha.78"
   APP_NAME: "burp-upstream-adapter"
 
 jobs:
@@ -68,9 +67,8 @@ jobs:
     uses: ./.github/workflows/release-macos.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
-      go-version: "1.23"
-      node-version: "20"
-      wails-version: "v2.11.0"
+      go-version: "1.25"
+      wails-version: "v3.0.0-alpha.78"
       app-name: "burp-upstream-adapter"
     secrets:
       BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
@@ -85,9 +83,8 @@ jobs:
     uses: ./.github/workflows/release-windows.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
-      go-version: "1.23"
-      node-version: "20"
-      wails-version: "v2.11.0"
+      go-version: "1.25"
+      wails-version: "v3.0.0-alpha.78"
       app-name: "burp-upstream-adapter"
 
   linux:
@@ -95,9 +92,8 @@ jobs:
     uses: ./.github/workflows/release-linux.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
-      go-version: "1.23"
-      node-version: "20"
-      wails-version: "v2.11.0"
+      go-version: "1.25"
+      wails-version: "v3.0.0-alpha.78"
       app-name: "burp-upstream-adapter"
 
   # ──────────────────────────────────────────────
@@ -135,7 +131,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.version }}
-          name: "Burp Upstream HTTPS Proxy Adapter ${{ needs.prepare.outputs.version }}"
+          name: ${{ needs.prepare.outputs.version }}
           draft: false
           prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
           generate_release_notes: true
@@ -150,7 +146,6 @@ jobs:
             | Platform | Architecture | File | Signed |
             |----------|-------------|------|--------|
             | macOS | Apple Silicon (arm64) | `burp-upstream-adapter-darwin-arm64.zip` | Developer ID + Notarized |
-            | macOS | Intel (amd64) | `burp-upstream-adapter-darwin-amd64.zip` | Developer ID + Notarized |
             | Windows | x64 | `burp-upstream-adapter-windows-amd64.zip` | — |
             | Linux | x64 | `burp-upstream-adapter-linux-amd64.tar.gz` | — |
 

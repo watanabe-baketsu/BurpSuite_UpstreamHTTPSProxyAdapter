@@ -10,6 +10,8 @@ export interface ConfigDTO {
   idle_timeout: number;
   bind_host: string;
   bind_port: number;
+  minimize_to_tray_on_close: boolean;
+  hide_dock_icon: boolean;
 }
 
 export interface ProfileSummary {
@@ -22,6 +24,7 @@ export interface MetricsSnapshot {
   bytes_in: number;
   bytes_out: number;
   last_error: string;
+  last_error_at?: string;
 }
 
 export interface LogEntry {

@@ -132,6 +132,76 @@ def create_icon():
     return img
 
 
+def create_tray_template():
+    """Generate a 32x32 black-on-transparent template image for the macOS
+    menu-bar icon. Template images must be black + alpha only — macOS
+    composites the appropriate colour for the current appearance (light/dark).
+    """
+    S = 256  # work at higher res, downscale at the end
+    c = S // 2
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Shield silhouette — same proportions as appicon but solid black.
+    sw, sh = int(S * 0.78), int(S * 0.86)
+    s_top = c - sh // 2 + 6
+    s_bot = c + sh // 2 + 6
+    s_left = c - sw // 2
+    s_right = c + sw // 2
+    s_knee = c + sh // 7
+    shield = [
+        (s_left, s_top), (s_right, s_top),
+        (s_right, s_knee), (c, s_bot), (s_left, s_knee),
+    ]
+    draw.polygon(shield, fill=(0, 0, 0, 255))
+
+    # Punch out a small lock keyhole so the silhouette reads as a security icon.
+    kr = int(S * 0.05)
+    ky = c + 12
+    draw.ellipse([c - kr, ky - kr, c + kr, ky + kr], fill=(0, 0, 0, 0))
+    draw.rounded_rectangle(
+        [c - kr // 2, ky, c + kr // 2, ky + kr * 2],
+        radius=2, fill=(0, 0, 0, 0),
+    )
+
+    return img.resize((32, 32), Image.LANCZOS)
+
+
+def create_tray_regular():
+    """Generate a 32x32 colour PNG for Linux/Windows tray (where template
+    images are not supported). Uses a flat blue palette to stay legible at
+    small sizes; the gradient detail of the full app icon is lost at 32px.
+    """
+    S = 256
+    c = S // 2
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    blue = (100, 140, 255, 255)
+
+    sw, sh = int(S * 0.78), int(S * 0.86)
+    s_top = c - sh // 2 + 6
+    s_bot = c + sh // 2 + 6
+    s_left = c - sw // 2
+    s_right = c + sw // 2
+    s_knee = c + sh // 7
+    shield = [
+        (s_left, s_top), (s_right, s_top),
+        (s_right, s_knee), (c, s_bot), (s_left, s_knee),
+    ]
+    draw.polygon(shield, fill=blue)
+
+    kr = int(S * 0.05)
+    ky = c + 12
+    draw.ellipse([c - kr, ky - kr, c + kr, ky + kr], fill=(0, 0, 0, 0))
+    draw.rounded_rectangle(
+        [c - kr // 2, ky, c + kr // 2, ky + kr * 2],
+        radius=2, fill=(0, 0, 0, 0),
+    )
+
+    return img.resize((32, 32), Image.LANCZOS)
+
+
 def main():
     img = create_icon()
 
@@ -144,6 +214,18 @@ def main():
     ico = "build/windows/icon.ico"
     imgs[0].save(ico, format="ICO", sizes=[(s, s) for s in ico_sizes], append_images=imgs[1:])
     print(f"  {ico} ({', '.join(str(s) for s in ico_sizes)})")
+
+    # Tray icons — embedded by the Go side via go:embed. The template image
+    # is used on macOS so it auto-adapts to the menu-bar appearance; the
+    # regular variant is used on Linux/Windows where templates are ignored.
+    tray_template = "build/tray/tray-template.png"
+    tray_regular = "build/tray/tray-regular.png"
+    import os
+    os.makedirs("build/tray", exist_ok=True)
+    create_tray_template().save(tray_template, "PNG")
+    print(f"  {tray_template} (32x32 template)")
+    create_tray_regular().save(tray_regular, "PNG")
+    print(f"  {tray_regular} (32x32 regular)")
 
 
 if __name__ == "__main__":

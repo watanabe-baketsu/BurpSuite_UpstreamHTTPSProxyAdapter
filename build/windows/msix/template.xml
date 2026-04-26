@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MsixPackagingToolTemplate
+    xmlns="http://schemas.microsoft.com/msix/packaging/msixpackagingtool/template/2022">
+    <Settings
+        AllowTelemetry="false"
+        ApplyACLsToPackageFiles="true"
+        GenerateCommandLineFile="true"
+        AllowPromptForPassword="false">
+    </Settings>
+    <Installer
+        Path="burp-upstream-adapter"
+        Arguments=""
+        InstallLocation="C:\Program Files\watanabe-baketsu\Burp Upstream HTTPS Proxy Adapter">
+    </Installer>
+    <PackageInformation
+        PackageName="Burp Upstream HTTPS Proxy Adapter"
+        PackageDisplayName="Burp Upstream HTTPS Proxy Adapter"
+        PublisherName="CN=watanabe-baketsu"
+        PublisherDisplayName="watanabe-baketsu"
+        Version="0.0.1.0"
+        PackageDescription="HTTPS upstream proxy adapter for Burp Suite">
+        <Capabilities>
+            <Capability Name="runFullTrust" />
+            
+        </Capabilities>
+        <Applications>
+            <Application
+                Id="com.watanabe-baketsu.burp-upstream-adapter"
+                Description="HTTPS upstream proxy adapter for Burp Suite"
+                DisplayName="Burp Upstream HTTPS Proxy Adapter"
+                ExecutableName="burp-upstream-adapter"
+                EntryPoint="Windows.FullTrustApplication">
+                
+            </Application>
+        </Applications>
+        <Resources>
+            <Resource Language="en-us" />
+        </Resources>
+        <Dependencies>
+            <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.19041.0" />
+        </Dependencies>
+        <Properties>
+            <Framework>false</Framework>
+            <DisplayName>Burp Upstream HTTPS Proxy Adapter</DisplayName>
+            <PublisherDisplayName>watanabe-baketsu</PublisherDisplayName>
+            <Description>HTTPS upstream proxy adapter for Burp Suite</Description>
+            <Logo>Assets\AppIcon.png</Logo>
+        </Properties>
+    </PackageInformation>
+    <SaveLocation PackagePath="burp-upstream-adapter.msix" />
+    <PackageIntegrity>
+        <CertificatePath></CertificatePath>
+    </PackageIntegrity>
+</MsixPackagingToolTemplate>

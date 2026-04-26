@@ -51,6 +51,15 @@ type ProfileConfig struct {
 type LocalConfig struct {
 	BindHost string `json:"bind_host"`
 	BindPort int    `json:"bind_port"`
+
+	// MinimizeToTrayOnClose hides the main window to the system tray when the
+	// user clicks the close button instead of quitting the application.
+	MinimizeToTrayOnClose bool `json:"minimize_to_tray_on_close"`
+
+	// HideDockIcon (macOS only) makes the app run as an accessory app — no
+	// Dock icon, no Cmd+Tab presence, only the menu-bar icon. Takes effect on
+	// next launch because activation policy is set during application startup.
+	HideDockIcon bool `json:"hide_dock_icon"`
 }
 
 // DefaultProfile returns the upstream defaults used for a new profile.
@@ -72,8 +81,10 @@ func Default() Config {
 			DefaultProfileName: DefaultProfile(),
 		},
 		Local: LocalConfig{
-			BindHost: "127.0.0.1",
-			BindPort: 18080,
+			BindHost:              "127.0.0.1",
+			BindPort:              18080,
+			MinimizeToTrayOnClose: false,
+			HideDockIcon:          false,
 		},
 	}
 }

@@ -1,8 +1,9 @@
 # ════════════════════════════════════════════════════════════════
-# Windows Build
+# Windows Build (Wails v3 + bun + Task)
 # ════════════════════════════════════════════════════════════════
-# Reusable workflow called from release.yml.
-# Builds the Wails app on Windows and uploads the zip artifact.
+# Uses `wails3 task windows:build` to compile the .exe, then zips it
+# for distribution. NSIS / MSIX packaging is available via
+# `wails3 task windows:package` if needed later.
 # ════════════════════════════════════════════════════════════════
 
 name: "Build Windows"
@@ -16,15 +17,11 @@ on:
       go-version:
         required: false
         type: string
-        default: "1.23"
-      node-version:
-        required: false
-        type: string
-        default: "20"
+        default: "1.25"
       wails-version:
         required: false
         type: string
-        default: "v2.11.0"
+        default: "v3.0.0-alpha.78"
       app-name:
         required: false
         type: string
@@ -47,29 +44,35 @@ jobs:
         with:
           go-version: ${{ inputs.go-version }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: ${{ inputs.node-version }}
+          bun-version: latest
 
-      - name: Install Wails CLI
+      - name: Install Wails3 CLI
         shell: bash
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ inputs.wails-version }}
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ inputs.wails-version }}
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run Go tests
         shell: bash
         run: go test ./internal/... -v -count=1 -timeout 120s
 
-      - name: Wails build
+      - name: Build (wails3 task windows:build)
         shell: bash
-        run: wails build -platform windows/amd64
+        run: wails3 task windows:build
 
       - name: Package
         shell: pwsh
         run: |
           $artifact = "${{ inputs.app-name }}-windows-amd64"
           Compress-Archive `
-            -Path "build\bin\${{ inputs.app-name }}.exe" `
+            -Path "bin\${{ inputs.app-name }}.exe" `
             -DestinationPath "${artifact}.zip"
           echo "ARTIFACT_NAME=${artifact}" >> $env:GITHUB_ENV
           echo "ASSET_PATH=${artifact}.zip" >> $env:GITHUB_ENV

@@ -1,0 +1,115 @@
+# Common tasks shared across platform Taskfiles. Adapted from the upstream
+# Wails v3 scaffold (`wails3 generate build-assets`) with two changes:
+#
+#  1. The frontend toolchain uses **bun** instead of npm.
+#  2. The Puppertino-CSS auto-fetch task is removed (we ship our own styles).
+#
+# Server-mode + Docker-cross tasks are kept verbatim so future work can opt in
+# without re-scaffolding.
+
+version: '3'
+
+tasks:
+  go:mod:tidy:
+    summary: Runs `go mod tidy`
+    internal: true
+    cmds:
+      - go mod tidy
+
+  install:frontend:deps:
+    summary: Install frontend dependencies (bun)
+    dir: frontend
+    sources:
+      - package.json
+      - bun.lock
+    generates:
+      - node_modules/**/*
+    preconditions:
+      - sh: bun --version
+        msg: "bun is not installed. Install it from https://bun.sh/"
+    cmds:
+      - bun install --frozen-lockfile
+
+  build:frontend:
+    label: build:frontend (DEV={{.DEV}})
+    summary: Build the frontend bundle (Vite via bun)
+    dir: frontend
+    sources:
+      - "**/*"
+      - exclude: node_modules/**/*
+      - exclude: dist/**/*
+    generates:
+      - dist/**/*
+    deps:
+      - task: install:frontend:deps
+      - task: generate:bindings
+        vars:
+          BUILD_FLAGS:
+            ref: .BUILD_FLAGS
+    cmds:
+      - bun run {{.BUILD_COMMAND}}
+    env:
+      PRODUCTION: '{{if eq .DEV "true"}}false{{else}}true{{end}}'
+    vars:
+      # Vite has a single `build` script; treat dev/production identically here.
+      # The PRODUCTION env can be read by vite.config.ts if needed.
+      BUILD_COMMAND: 'build'
+
+  generate:bindings:
+    label: generate:bindings (BUILD_FLAGS={{.BUILD_FLAGS}})
+    summary: Generates bindings for the frontend
+    deps:
+      - task: go:mod:tidy
+    sources:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+    generates:
+      - frontend/bindings/**/*
+    cmds:
+      - wails3 generate bindings -ts -d frontend/bindings -clean=true
+
+  generate:icons:
+    summary: Generates Windows .ico, macOS .icns and Assets.car from build/appicon.png
+    dir: build
+    sources:
+      - "appicon.png"
+      - "appicon.icon/**/*"
+    generates:
+      - "darwin/icons.icns"
+      - "windows/icon.ico"
+    cmds:
+      - wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icon.ico -iconcomposerinput appicon.icon -macassetdir darwin
+
+  dev:frontend:
+    summary: Runs the frontend in development mode (Vite via bun)
+    dir: frontend
+    deps:
+      - task: install:frontend:deps
+    cmds:
+      - bun run dev -- --port {{.VITE_PORT}} --strictPort
+
+  update:build-assets:
+    summary: Re-runs `wails3 update build-assets` against build/config.yml
+    dir: build
+    cmds:
+      - wails3 update build-assets -name "{{.APP_NAME}}" -binaryname "{{.APP_NAME}}" -config config.yml -dir .
+
+  build:server:
+    summary: Builds a server-mode binary (no GUI)
+    deps:
+      - task: build:frontend
+        vars:
+          BUILD_FLAGS:
+            ref: .BUILD_FLAGS
+    cmds:
+      - go build -tags server {{.BUILD_FLAGS}} -o {{.BIN_DIR}}/{{.APP_NAME}}-server{{exeExt}}
+    vars:
+      BUILD_FLAGS: "{{.BUILD_FLAGS}}"
+
+  run:server:
+    summary: Builds and runs the server-mode binary
+    deps:
+      - task: build:server
+    cmds:
+      - ./{{.BIN_DIR}}/{{.APP_NAME}}-server{{exeExt}}
