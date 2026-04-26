@@ -69,6 +69,19 @@ jobs:
         with:
           bun-version: latest
 
+      # The wails3 CLI transitively imports v3/internal/operatingsystem which
+      # cgo-links to gtk+-3.0 / webkit2gtk on Linux, so `go install` fails
+      # without the dev headers in PKG_CONFIG_PATH. Match wails-build below.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            build-essential \
+            pkg-config
+
       - name: Install Wails3 CLI
         run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
 

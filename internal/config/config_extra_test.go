@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -180,8 +182,13 @@ func TestLoadInfersActiveFromFirstProfile(t *testing.T) {
 
 // TestSaveFilePermissions guards the contract that we never widen
 // permissions on the config file — it may contain usernames / hostnames the
-// user considers private.
+// user considers private. Skipped on Windows because os.Chmod / Stat there
+// don't honour POSIX bits (everything reads back as 0666), making the
+// assertion meaningless rather than wrong.
 func TestSaveFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
 	tmp := t.TempDir()
 	setHomeDir(t, tmp)
 
@@ -196,14 +203,11 @@ func TestSaveFilePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// On Windows the mode bits don't carry POSIX semantics; only assert on
-	// Unix-y systems where the permission matters for our threat model.
-	if mode := info.Mode().Perm(); mode != 0600 && mode != 0644 {
-		// 0600 is the contract; some CI sandboxes (umask) may end up at 0644.
-		// Fail only if the file is world-readable.
-		if mode&0o004 != 0 {
-			t.Errorf("config file is world-readable (mode %#o)", mode)
-		}
+	mode := info.Mode().Perm()
+	// 0600 is the contract; some CI sandboxes' umask may end up at 0644.
+	// Fail only if the file ends up world-readable.
+	if mode&0o004 != 0 {
+		t.Errorf("config file is world-readable (mode %#o)", mode)
 	}
 }
 
@@ -253,8 +257,14 @@ func TestMigrateLegacyReadsCAFile(t *testing.T) {
 	if err := os.WriteFile(pemPath, []byte(pemContent), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// JSON-encode the path so backslashes in Windows paths
+	// (C:\Users\runneradmin\AppData\Local\Temp\...) are properly escaped.
+	pemPathJSON, err := json.Marshal(pemPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := `{
-	  "upstream": {"host":"legacy","port":3128,"verify_tls":true,"custom_ca_path":"` + pemPath + `","connect_timeout_sec":30,"idle_timeout_sec":300},
+	  "upstream": {"host":"legacy","port":3128,"verify_tls":true,"custom_ca_path":` + string(pemPathJSON) + `,"connect_timeout_sec":30,"idle_timeout_sec":300},
 	  "local": {"bind_host":"127.0.0.1","bind_port":18080}
 	}`
 	_ = os.WriteFile(filepath.Join(cfgDir, DefaultConfigFile), []byte(body), 0600)
