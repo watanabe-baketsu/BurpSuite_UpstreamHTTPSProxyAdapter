@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 import {
+  EventsOn, EventsOff,
   GetConfig, SaveConfig, StartProxy, StopProxy, GetStatus,
   GetMetrics, GetLogs, ClearLogs, LoadCAPEMFromFile,
   TestUpstreamTLS, TestProxyAuth, TestCONNECT, TestHTTPGet,
   ListProfiles, SwitchProfile, CreateProfile, DuplicateProfile, DeleteProfile, RenameProfile,
-} from '../wailsjs/go/main/App';
+} from './wails-api';
 import type { ConfigDTO, MetricsSnapshot, LogEntry, CheckResult, ProfileSummary } from './types';
 
 const PROFILE_NAME_REGEX = /^[A-Za-z0-9_-]{1,32}$/;
@@ -16,6 +16,7 @@ const emptyConfig: ConfigDTO = {
   upstream_host: '', upstream_port: 3128, username: '', password: '',
   verify_tls: true, custom_ca_pem: '', connect_timeout: 30,
   idle_timeout: 300, bind_host: '127.0.0.1', bind_port: 18080,
+  minimize_to_tray_on_close: false, hide_dock_icon: false,
 };
 
 type ProfileDialog =
@@ -341,6 +342,25 @@ function App() {
                 <label>Bind Port
                   <input type="number" value={config.bind_port}
                     onChange={e => updateField('bind_port', parseInt(e.target.value) || 0)} />
+                </label>
+              </div>
+            </section>
+
+            <section className="section">
+              <h2>System Tray</h2>
+              <p className="section-hint">Behaviour when the window is closed</p>
+              <div className="form-grid">
+                <label className="checkbox-label">
+                  <input type="checkbox" checked={config.minimize_to_tray_on_close}
+                    onChange={e => updateField('minimize_to_tray_on_close', e.target.checked)} />
+                  Minimize to tray on close
+                  <span className="section-hint"> (window hides instead of quitting)</span>
+                </label>
+                <label className="checkbox-label">
+                  <input type="checkbox" checked={config.hide_dock_icon}
+                    onChange={e => updateField('hide_dock_icon', e.target.checked)} />
+                  Hide Dock icon (macOS only, restart required)
+                  <span className="section-hint"> (run as a menu-bar accessory app)</span>
                 </label>
               </div>
             </section>

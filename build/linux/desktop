@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=Burp Upstream HTTPS Proxy Adapter
+Comment=HTTPS upstream proxy adapter for Burp Suite
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/burp-upstream-adapter %u
+Terminal=false
+Type=Application
+Icon=burp-upstream-adapter
+Categories=Utility;
+StartupWMClass=burp-upstream-adapter
+
+ 

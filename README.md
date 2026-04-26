@@ -6,7 +6,7 @@ A native desktop application that sits between **Burp Suite** and an **authentic
 Burp Browser ─▶ Burp Proxy ─▶ This Adapter (localhost) ─▶ HTTPS Proxy (remote) ─▶ Internet
 ```
 
-Built with **Wails v2** (Go + React + TypeScript). Runs on macOS, Windows, and Linux.
+Built with **Wails v3 (alpha)** (Go + React + TypeScript). Runs on macOS, Windows, and Linux. Includes a system tray / menu-bar icon with Start/Stop, status, metrics, and profile-switch controls.
 
 ---
 
@@ -18,11 +18,13 @@ Burp Suite's upstream proxy feature supports plain HTTP proxies natively, but co
 
 - Local HTTP proxy that accepts both `CONNECT` tunnels and plain HTTP requests from Burp
 - Upstream connection to HTTPS proxies with TLS + Basic auth
-- Custom CA certificate support for private proxy infrastructure
+- **Multiple profiles** — switch between environments (e.g. production / staging) without re-typing credentials each time
+- **System tray / menu-bar icon** with Start/Stop, status, live metrics, and a profile-switch submenu (optional "minimize to tray on close" + macOS "hide Dock icon" toggles)
+- Custom CA certificate support for private proxy infrastructure (PEM stored inline in the profile)
 - OS keychain integration for password storage (macOS Keychain, Windows Credential Manager, Linux Secret Service)
 - Built-in diagnostics: TLS handshake, auth, CONNECT tunnel, and HTTP connectivity tests
 - Live log viewer and connection metrics
-- Cross-platform: macOS (arm64 / amd64), Windows (amd64), Linux (amd64)
+- Cross-platform: macOS (Apple Silicon / arm64), Windows (amd64), Linux (amd64)
 
 ## Quick Start
 
@@ -33,18 +35,21 @@ Download the latest release from [Releases](https://github.com/watanabe-baketsu/
 | Platform | File |
 |----------|------|
 | macOS (Apple Silicon) | `burp-upstream-adapter-darwin-arm64.zip` |
-| macOS (Intel) | `burp-upstream-adapter-darwin-amd64.zip` |
 | Windows | `burp-upstream-adapter-windows-amd64.zip` |
 | Linux | `burp-upstream-adapter-linux-amd64.tar.gz` |
 
 ### 2. Configure the Adapter
 
-1. Launch the application
+1. Launch the application. A `default` profile is created on first run.
 2. In the **Configuration** tab, fill in:
-   - **Upstream Proxy**: host, port, username, password of your HTTPS proxy
-   - **Local Listener**: leave defaults (`127.0.0.1:18080`) or customize
-3. Click **Save**, then **Start Proxy**
-4. Use the **Diagnostics** tab to verify connectivity
+   - **Profile**: keep `default` or click **New** / **Duplicate** / **Rename** to organise multiple environments.
+   - **Upstream Proxy**: host, port, username, password of your HTTPS proxy.
+   - **Local Listener**: leave defaults (`127.0.0.1:18080`) or customize.
+   - **System Tray** (optional): toggle "Minimize to tray on close" or, on macOS, "Hide Dock icon" for a menu-bar-only experience.
+3. Click **Save**, then **Start Proxy** (or use the tray's **Start Proxy** menu item).
+4. Use the **Diagnostics** tab to verify connectivity.
+
+To switch profiles later, use the dropdown in the header or the **Profile** submenu in the system tray. The proxy must be stopped before switching.
 
 ### 3. Configure Burp Suite
 
@@ -71,31 +76,53 @@ Open Burp's embedded browser or configure your browser to use Burp's proxy. All 
 
 | Tool | Version |
 |------|---------|
-| [Go](https://go.dev/dl/) | 1.23+ |
-| [Node.js](https://nodejs.org/) | 20+ |
-| [Wails CLI](https://wails.io/docs/gettingstarted/installation) | v2.11+ |
+| [Go](https://go.dev/dl/) | 1.25+ |
+| [Bun](https://bun.sh/) | 1.x (frontend package manager + runner; replaces npm) |
+| [Wails3 CLI](https://v3alpha.wails.io/) | `v3.0.0-alpha.78` |
 
-**Linux only** — install GTK and WebKit development libraries:
+> The frontend uses **bun** (not npm). Install with `curl -fsSL https://bun.sh/install | bash` or your package manager. bun reads the same `package.json` as npm and runs the same scripts; the lockfile is `bun.lock` (text-format, committed to the repo).
+
+**Linux only** — install GTK, WebKit, and AppIndicator development libraries (the last is needed for the system tray):
 
 ```bash
 # Ubuntu / Debian
-sudo apt-get install libgtk-3-dev libwebkit2gtk-4.0-dev build-essential pkg-config
+sudo apt-get install \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  build-essential pkg-config
 ```
 
 ### Build
 
+The project uses the **standard Wails v3 Taskfile pipeline** (`wails3 task ...`), patched to use bun instead of npm. Install the toolchain once:
+
 ```bash
-# Install Wails CLI (if not already installed)
-go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
-
-# Production build
-wails build
-
-# Development mode with hot-reload
-wails dev
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha.78
+go install github.com/go-task/task/v3/cmd/task@latest   # or `brew install go-task`
 ```
 
-The built binary is in `build/bin/`.
+Then for everyday development:
+
+```bash
+# Hot-reload dev mode (Vite + Go binary, restarts on .go changes)
+wails3 dev
+
+# Production build for the current OS (binary lands in bin/)
+wails3 task build
+
+# Production package for the current OS (.app on macOS, .deb/.rpm/.AppImage on Linux,
+# NSIS/MSIX on Windows — see build/<os>/Taskfile.yml for details)
+wails3 task package
+
+# Just regenerate the TypeScript bindings (after editing exported Go methods)
+wails3 task bindings
+
+# Run the unit tests
+wails3 task test
+```
+
+Direct `go run .` / `go build` still works for ad-hoc cases — `wails3 dev` is the convenience wrapper that runs the Vite dev server, the Go binary, and the bindings generator together with hot-reload on Go file changes.
+
+The first build will run `bun install` automatically. The output binary is in `bin/`.
 
 ### Run Tests
 
@@ -135,7 +162,7 @@ Passwords are **never** written to the config file. They are stored in the OS ke
 
 ### Configuration
 
-Set upstream proxy connection details, TLS settings, timeouts, and local listener address. Save and Start/Stop the proxy from here.
+Manage **profiles**, set upstream proxy connection details, TLS settings, timeouts, and local listener address. Toggle system-tray behaviour ("Minimize to tray on close", "Hide Dock icon" on macOS). Save and Start/Stop the proxy from here.
 
 ### Diagnostics
 
@@ -155,6 +182,18 @@ Four built-in tests to validate your setup before using Burp:
 ### Burp Setup
 
 Step-by-step guide for configuring Burp Suite, dynamically populated with your current adapter settings.
+
+## System Tray
+
+The tray icon shows the current proxy state and gives quick access to the most common actions without opening the window:
+
+- **Status: Running (port) / Stopped** — live state, refreshes every second
+- **Profile: ${active}** — current active profile name
+- **Start Proxy / Stop Proxy** — toggle the proxy
+- **Active connections** / **Total requests** — live metrics
+- **Profile** submenu — radio list of all profiles for quick switching (stops the proxy first if running)
+- **Show Window** — restore the window if hidden
+- **Quit** — stop the proxy and exit the app
 
 ## Documentation
 

@@ -8,7 +8,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"burp-upstream-adapter/internal/adapter"
 	"burp-upstream-adapter/internal/config"
@@ -17,38 +17,94 @@ import (
 	"burp-upstream-adapter/internal/upstream"
 )
 
+// App is the singleton service bound to the frontend. Wails v3 exposes every
+// exported method as a JS/TS binding, so the public surface here is the same
+// contract the React frontend depends on. The service also acts as the bridge
+// between proxy state and the system tray, so app.go owns the tray-visible
+// observers (statusObservers / metricsObservers) too.
 type App struct {
-	ctx    context.Context
+	app    *application.App
+	window *application.WebviewWindow
+
 	log    *logging.Logger
 	server *adapter.Server
 	cfg    config.Config
 	mu     sync.Mutex
+
+	// Tray subscribers. Tray rebuilds in place on each event rather than
+	// re-creating the menu, so list rebuilds (profile rename/delete) do not
+	// trigger the systray rebuild crash reported in wailsapp/wails#5227.
+	obsMu            sync.Mutex
+	statusObservers  []func(running bool)
+	profileObservers []func(active string, profiles []string)
+}
+
+// preferAccessoryActivation reports whether the app should launch as a macOS
+// accessory app (no Dock icon). It is read before application.New, so it
+// cannot use the ServiceStartup-injected logger. Lowercase to keep it out of
+// the frontend bindings — the toggle is exposed via ConfigDTO instead.
+func (a *App) preferAccessoryActivation() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg.Local.HideDockIcon
+}
+
+// minimizeToTrayOnClose is consulted by the WindowClosing hook to decide
+// whether to swallow the close event and hide the window instead.
+func (a *App) minimizeToTrayOnClose() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg.Local.MinimizeToTrayOnClose
 }
 
 func NewApp() *App {
-	return &App{
+	a := &App{
 		log: logging.New(1000),
 	}
-}
-
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
-
-	a.log.SetCallback(func(entry logging.Entry) {
-		runtime.EventsEmit(ctx, "log", entry)
-	})
-
+	// Load the config eagerly so PreferAccessoryActivation() returns the
+	// user's choice before application.New is called. ServiceStartup runs
+	// after the application is already constructed, which is too late for
+	// the macOS activation policy.
 	cfg, err := config.Load()
 	if err != nil {
 		a.log.Warn("Failed to load config, using defaults: %v", err)
 		cfg = config.Default()
 	}
 	a.cfg = cfg
-	a.applyWindowTitle()
-	a.log.Info("Config loaded (active profile: %s)", cfg.ActiveProfile)
+	return a
 }
 
-func (a *App) shutdown(_ context.Context) {
+// attachApp wires the running application into the service so it can emit
+// events. Called from main.go after application.New returns. Lowercase so
+// the Wails v3 binding generator does not expose it to the frontend.
+func (a *App) attachApp(app *application.App) {
+	a.app = app
+}
+
+// attachWindow wires the primary window into the service so window-control
+// methods (ShowWindow / HideWindow) can target it. Called from main.go.
+func (a *App) attachWindow(w *application.WebviewWindow) {
+	a.window = w
+}
+
+// ServiceStartup is the Wails v3 lifecycle hook that runs after bindings are
+// wired. We use it to forward each log entry to the frontend via the typed
+// event channel.
+func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) error {
+	a.log.SetCallback(func(entry logging.Entry) {
+		if a.app != nil {
+			a.app.Event.Emit("log", entry)
+		}
+	})
+	a.log.Info("Config loaded (active profile: %s)", a.cfg.ActiveProfile)
+	a.applyWindowTitle()
+	return nil
+}
+
+// onAppShutdown is the application-level shutdown hook (registered on
+// Options.OnShutdown). It runs once when the app is exiting and stops the
+// proxy gracefully. Lowercase so it isn't bound to the frontend.
+func (a *App) onAppShutdown() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.server != nil && a.server.IsRunning() {
@@ -58,14 +114,66 @@ func (a *App) shutdown(_ context.Context) {
 
 // applyWindowTitle updates the native window title to reflect the active profile.
 func (a *App) applyWindowTitle() {
-	if a.ctx == nil {
+	if a.window == nil {
 		return
 	}
 	title := "Burp Upstream HTTPS Proxy Adapter"
 	if a.cfg.ActiveProfile != "" {
 		title = title + " — " + a.cfg.ActiveProfile
 	}
-	runtime.WindowSetTitle(a.ctx, title)
+	a.window.SetTitle(title)
+}
+
+// emitStatus publishes the running/stopped event to the frontend AND
+// notifies tray observers. Tray observers run synchronously here so the
+// menu-bar reflects state changes without relying on the next poll tick.
+func (a *App) emitStatus(running bool) {
+	state := "stopped"
+	if running {
+		state = "running"
+	}
+	if a.app != nil {
+		a.app.Event.Emit("status", state)
+	}
+	a.notifyStatusObservers(running)
+}
+
+// --- Tray observer plumbing (called by tray.go) ---
+// Methods are lowercase so the Wails v3 binding generator does not expose
+// these function-typed callbacks to the frontend (it cannot serialise them).
+
+func (a *App) onStatusChange(fn func(running bool)) {
+	a.obsMu.Lock()
+	a.statusObservers = append(a.statusObservers, fn)
+	a.obsMu.Unlock()
+}
+
+func (a *App) onProfileChange(fn func(active string, profiles []string)) {
+	a.obsMu.Lock()
+	a.profileObservers = append(a.profileObservers, fn)
+	a.obsMu.Unlock()
+}
+
+func (a *App) notifyStatusObservers(running bool) {
+	a.obsMu.Lock()
+	obs := append([]func(bool){}, a.statusObservers...)
+	a.obsMu.Unlock()
+	for _, fn := range obs {
+		fn(running)
+	}
+}
+
+func (a *App) notifyProfileObservers() {
+	a.mu.Lock()
+	active := a.cfg.ActiveProfile
+	profiles := a.cfg.ProfileNames()
+	a.mu.Unlock()
+	a.obsMu.Lock()
+	obs := append([]func(string, []string){}, a.profileObservers...)
+	a.obsMu.Unlock()
+	for _, fn := range obs {
+		fn(active, profiles)
+	}
 }
 
 // --- DTOs ---
@@ -73,17 +181,19 @@ func (a *App) applyWindowTitle() {
 // ConfigDTO is the flat payload exchanged with the frontend for the active
 // profile's settings plus the shared local listener settings.
 type ConfigDTO struct {
-	ActiveProfile  string `json:"active_profile"`
-	UpstreamHost   string `json:"upstream_host"`
-	UpstreamPort   int    `json:"upstream_port"`
-	Username       string `json:"username"`
-	Password       string `json:"password"`
-	VerifyTLS      bool   `json:"verify_tls"`
-	CustomCAPEM    string `json:"custom_ca_pem"`
-	ConnectTimeout int    `json:"connect_timeout"`
-	IdleTimeout    int    `json:"idle_timeout"`
-	BindHost       string `json:"bind_host"`
-	BindPort       int    `json:"bind_port"`
+	ActiveProfile         string `json:"active_profile"`
+	UpstreamHost          string `json:"upstream_host"`
+	UpstreamPort          int    `json:"upstream_port"`
+	Username              string `json:"username"`
+	Password              string `json:"password"`
+	VerifyTLS             bool   `json:"verify_tls"`
+	CustomCAPEM           string `json:"custom_ca_pem"`
+	ConnectTimeout        int    `json:"connect_timeout"`
+	IdleTimeout           int    `json:"idle_timeout"`
+	BindHost              string `json:"bind_host"`
+	BindPort              int    `json:"bind_port"`
+	MinimizeToTrayOnClose bool   `json:"minimize_to_tray_on_close"`
+	HideDockIcon          bool   `json:"hide_dock_icon"`
 }
 
 // ProfileSummary is a lightweight representation used for populating the
@@ -123,24 +233,28 @@ func (a *App) buildDTO() ConfigDTO {
 		// Shouldn't happen after Load() normalises the config, but return
 		// a minimal DTO so the UI can still render.
 		return ConfigDTO{
-			ActiveProfile: active,
-			BindHost:      local.BindHost,
-			BindPort:      local.BindPort,
+			ActiveProfile:         active,
+			BindHost:              local.BindHost,
+			BindPort:              local.BindPort,
+			MinimizeToTrayOnClose: local.MinimizeToTrayOnClose,
+			HideDockIcon:          local.HideDockIcon,
 		}
 	}
 	pw, _ := keychain.LoadPassword(active, prof.Username)
 	return ConfigDTO{
-		ActiveProfile:  active,
-		UpstreamHost:   prof.Host,
-		UpstreamPort:   prof.Port,
-		Username:       prof.Username,
-		Password:       pw,
-		VerifyTLS:      prof.VerifyTLS,
-		CustomCAPEM:    prof.CustomCAPEM,
-		ConnectTimeout: prof.ConnectTimeout,
-		IdleTimeout:    prof.IdleTimeout,
-		BindHost:       local.BindHost,
-		BindPort:       local.BindPort,
+		ActiveProfile:         active,
+		UpstreamHost:          prof.Host,
+		UpstreamPort:          prof.Port,
+		Username:              prof.Username,
+		Password:              pw,
+		VerifyTLS:             prof.VerifyTLS,
+		CustomCAPEM:           prof.CustomCAPEM,
+		ConnectTimeout:        prof.ConnectTimeout,
+		IdleTimeout:           prof.IdleTimeout,
+		BindHost:              local.BindHost,
+		BindPort:              local.BindPort,
+		MinimizeToTrayOnClose: local.MinimizeToTrayOnClose,
+		HideDockIcon:          local.HideDockIcon,
 	}
 }
 
@@ -158,7 +272,12 @@ func (a *App) SaveConfig(dto ConfigDTO) error {
 		return fmt.Errorf("no active profile")
 	}
 	active := a.cfg.ActiveProfile
-	oldUsername := a.cfg.Profiles[active].Username
+	activeProf, ok := a.cfg.Profiles[active]
+	if !ok {
+		a.mu.Unlock()
+		return fmt.Errorf("active profile %q is missing from config", active)
+	}
+	oldUsername := activeProf.Username
 
 	prof := config.ProfileConfig{
 		Host:           dto.UpstreamHost,
@@ -175,7 +294,12 @@ func (a *App) SaveConfig(dto ConfigDTO) error {
 	// until validation succeeds.
 	newCfg.Profiles = maps.Clone(a.cfg.Profiles)
 	newCfg.Profiles[active] = prof
-	newCfg.Local = config.LocalConfig{BindHost: dto.BindHost, BindPort: dto.BindPort}
+	newCfg.Local = config.LocalConfig{
+		BindHost:              dto.BindHost,
+		BindPort:              dto.BindPort,
+		MinimizeToTrayOnClose: dto.MinimizeToTrayOnClose,
+		HideDockIcon:          dto.HideDockIcon,
+	}
 
 	if err := newCfg.Validate(); err != nil {
 		a.mu.Unlock()
@@ -255,9 +379,10 @@ func (a *App) SwitchProfile(name string) (ConfigDTO, error) {
 		a.mu.Unlock()
 		return ConfigDTO{}, fmt.Errorf("save config: %w", err)
 	}
-	a.applyWindowTitle()
 	a.log.Info("Switched to profile %q", name)
 	a.mu.Unlock()
+	a.applyWindowTitle()
+	a.notifyProfileObservers()
 	return a.buildDTO(), nil
 }
 
@@ -285,9 +410,10 @@ func (a *App) CreateProfile(name string) (ConfigDTO, error) {
 		a.mu.Unlock()
 		return ConfigDTO{}, fmt.Errorf("save config: %w", err)
 	}
-	a.applyWindowTitle()
 	a.log.Info("Created profile %q", name)
 	a.mu.Unlock()
+	a.applyWindowTitle()
+	a.notifyProfileObservers()
 	return a.buildDTO(), nil
 }
 
@@ -320,16 +446,17 @@ func (a *App) DuplicateProfile(src, dst string) (ConfigDTO, error) {
 		a.mu.Unlock()
 		return ConfigDTO{}, fmt.Errorf("save config: %w", err)
 	}
-	a.applyWindowTitle()
 	a.log.Info("Duplicated profile %q to %q", src, dst)
 	a.mu.Unlock()
 
+	a.applyWindowTitle()
 	// Keychain work happens outside the mutex so a blocking OS auth prompt
 	// can't stall the whole App. Best-effort: a failure here just means the
 	// user re-enters the password after switching.
 	if pw, err := keychain.LoadPassword(src, srcProfile.Username); err == nil && pw != "" {
 		_ = keychain.SavePassword(dst, srcProfile.Username, pw)
 	}
+	a.notifyProfileObservers()
 	return a.buildDTO(), nil
 }
 
@@ -370,10 +497,10 @@ func (a *App) RenameProfile(oldName, newName string) (ConfigDTO, error) {
 		a.mu.Unlock()
 		return ConfigDTO{}, fmt.Errorf("save config: %w", err)
 	}
-	a.applyWindowTitle()
 	a.log.Info("Renamed profile %q to %q", oldName, newName)
 	a.mu.Unlock()
 
+	a.applyWindowTitle()
 	// Migrate the keychain entry so the password follows the rename. Both
 	// steps are best-effort — losing the password just forces the user to
 	// re-enter it, which is preferable to keeping an orphan under the old
@@ -382,6 +509,7 @@ func (a *App) RenameProfile(oldName, newName string) (ConfigDTO, error) {
 		_ = keychain.SavePassword(newName, prof.Username, pw)
 	}
 	_ = keychain.DeletePassword(oldName, prof.Username)
+	a.notifyProfileObservers()
 	return a.buildDTO(), nil
 }
 
@@ -413,14 +541,15 @@ func (a *App) DeleteProfile(name string) (ConfigDTO, error) {
 		a.mu.Unlock()
 		return ConfigDTO{}, fmt.Errorf("save config: %w", err)
 	}
-	a.applyWindowTitle()
 	a.log.Info("Deleted profile %q", name)
 	a.mu.Unlock()
 
+	a.applyWindowTitle()
 	// Drop the keychain entry outside the mutex. Any orphaned entries for
 	// previously-used usernames on this profile will remain — username
 	// changes are not tracked, so we only clean up the current one.
 	_ = keychain.DeletePassword(name, prof.Username)
+	a.notifyProfileObservers()
 	return a.buildDTO(), nil
 }
 
@@ -457,26 +586,35 @@ func (a *App) StartProxy() error {
 		return err
 	}
 
+	// Commit the new server pointer *before* publishing the status change.
+	// Otherwise GetMetrics readers (notably the tray ticker) can race against
+	// the start sequence and surface metrics from the previous, stopped
+	// server during the gap between Start succeeding and the new pointer
+	// being installed.
 	a.mu.Lock()
 	a.server = srv
 	a.mu.Unlock()
-	runtime.EventsEmit(a.ctx, "status", "running")
+
+	a.emitStatus(true)
 	return nil
 }
 
 func (a *App) StopProxy() error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	if a.server == nil || !a.server.IsRunning() {
+		a.mu.Unlock()
 		return nil
 	}
+	srv := a.server
+	a.mu.Unlock()
 
-	if err := a.server.Stop(); err != nil {
+	// server.Stop blocks for up to 5 seconds waiting for in-flight connections
+	// to drain. We must not hold a.mu across that window, otherwise every
+	// frontend RPC and the tray ticker stalls until shutdown completes.
+	if err := srv.Stop(); err != nil {
 		return err
 	}
-
-	runtime.EventsEmit(a.ctx, "status", "stopped")
+	a.emitStatus(false)
 	return nil
 }
 
@@ -498,12 +636,40 @@ func (a *App) GetMetrics() adapter.MetricsSnapshot {
 	return adapter.MetricsSnapshot{}
 }
 
+// boundPort returns the live listener port so the tray label can display it
+// without going through the JSON DTO. Falls back to the configured BindPort
+// when the server isn't running.
+func (a *App) boundPort() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg.Local.BindPort
+}
+
+// activeProfileName returns the active profile name without the JSON-DTO
+// trip, for the tray's status label.
+func (a *App) activeProfileName() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg.ActiveProfile
+}
+
 func (a *App) GetLogs() []logging.Entry {
 	return a.log.Entries()
 }
 
 func (a *App) ClearLogs() {
 	a.log.Clear()
+}
+
+// --- Window / lifecycle helpers used by the tray ---
+// Window control is not exposed to the frontend RPC surface (the tray owns
+// the WebviewWindow pointer directly). Quit stays exported because the
+// frontend may want to ask for a graceful exit from a UI element.
+
+func (a *App) Quit() {
+	if a.app != nil {
+		a.app.Quit()
+	}
 }
 
 // --- Diagnostics ---
@@ -553,7 +719,7 @@ func (a *App) TestUpstreamTLS() upstream.CheckResult {
 	if err != nil {
 		return upstream.CheckResult{OK: false, Message: err.Error()}
 	}
-	result := upstream.CheckTLS(a.ctx, d.profile.UpstreamAddr(), d.profile.ConnectTimeoutDuration(), d.tlsCfg)
+	result := upstream.CheckTLS(context.Background(), d.profile.UpstreamAddr(), d.profile.ConnectTimeoutDuration(), d.tlsCfg)
 	a.logCheckResult("TLS test", result)
 	return result
 }
@@ -563,7 +729,7 @@ func (a *App) TestProxyAuth() upstream.CheckResult {
 	if err != nil {
 		return upstream.CheckResult{OK: false, Message: err.Error()}
 	}
-	result := upstream.CheckProxyAuth(a.ctx, d.profile.UpstreamAddr(), d.profile.ConnectTimeoutDuration(), d.tlsCfg, d.profile.Username, d.pw)
+	result := upstream.CheckProxyAuth(context.Background(), d.profile.UpstreamAddr(), d.profile.ConnectTimeoutDuration(), d.tlsCfg, d.profile.Username, d.pw)
 	a.logCheckResult("Auth test", result)
 	return result
 }
@@ -576,7 +742,7 @@ func (a *App) TestCONNECT(target string) upstream.CheckResult {
 	if err != nil {
 		return upstream.CheckResult{OK: false, Message: err.Error()}
 	}
-	result := upstream.CheckCONNECT(a.ctx, d.profile.UpstreamAddr(), d.profile.ConnectTimeoutDuration(), d.tlsCfg, d.profile.Username, d.pw, target)
+	result := upstream.CheckCONNECT(context.Background(), d.profile.UpstreamAddr(), d.profile.ConnectTimeoutDuration(), d.tlsCfg, d.profile.Username, d.pw, target)
 	a.logCheckResult("CONNECT test", result)
 	return result
 }
@@ -589,7 +755,7 @@ func (a *App) TestHTTPGet(targetURL string) upstream.CheckResult {
 	if err != nil {
 		return upstream.CheckResult{OK: false, Message: err.Error()}
 	}
-	result := upstream.CheckHTTP(a.ctx, d.profile.UpstreamAddr(), d.profile.ConnectTimeoutDuration(), d.tlsCfg, d.profile.Username, d.pw, targetURL)
+	result := upstream.CheckHTTP(context.Background(), d.profile.UpstreamAddr(), d.profile.ConnectTimeoutDuration(), d.tlsCfg, d.profile.Username, d.pw, targetURL)
 	a.logCheckResult("HTTP test", result)
 	return result
 }
@@ -600,13 +766,14 @@ func (a *App) TestHTTPGet(targetURL string) upstream.CheckResult {
 // so the frontend can store the bytes inline in the profile config. An empty
 // return value with nil error indicates the user cancelled the dialog.
 func (a *App) LoadCAPEMFromFile() (string, error) {
-	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "Select CA Certificate PEM File",
-		Filters: []runtime.FileFilter{
-			{DisplayName: "PEM Files", Pattern: "*.pem;*.crt;*.cer"},
-			{DisplayName: "All Files", Pattern: "*"},
-		},
-	})
+	if a.app == nil {
+		return "", fmt.Errorf("application not initialised")
+	}
+	dialog := a.app.Dialog.OpenFile()
+	dialog.SetTitle("Select CA Certificate PEM File")
+	dialog.AddFilter("PEM Files", "*.pem;*.crt;*.cer")
+	dialog.AddFilter("All Files", "*")
+	path, err := dialog.PromptForSingleSelection()
 	if err != nil {
 		return "", err
 	}
